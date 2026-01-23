@@ -153,6 +153,35 @@ Composing these (applying divergence to gradient):
 
 This exactly matches the narrow 5-point Laplacian, ensuring consistency. The divergence and pressure residual agree up to a constant factor, so we can measure solver convergence via either metric.
 
+#### Staggered Grid Interpretation
+
+The forward/backward difference combination isn't arbitrary - it implies a **MAC (Marker-and-Cell) staggered grid** interpretation:
+
+- `velocity.x[i,j]` = u-velocity on the **left face** of cell (i,j)
+- `velocity.y[i,j]` = v-velocity on the **bottom face** of cell (i,j)
+- `pressure[i,j]` = pressure at the **center** of cell (i,j)
+
+The storage is collocated (same array index), but the semantic interpretation is staggered. This isn't something we imposed - it emerges naturally from requiring both the narrow stencil and operator consistency.
+
+#### Why Not a Truly Collocated Grid?
+
+An alternative would be central differences for both divergence and gradient, yielding a **wide Laplacian** stencil (distance-2 neighbors). This allows a truly collocated grid where all quantities live at cell centers. However, this approach has serious problems:
+
+**Checkerboard instability**: With a wide stencil, pressure at (i,j) only couples to cells at (i±2, j) and (i, j±2). Immediate neighbors are decoupled, creating two independent systems:
+- "Red" cells (i+j even)
+- "Black" cells (i+j odd)
+
+A checkerboard pressure pattern (alternating ±1) satisfies the wide Laplacian (it sees zeros) and is invisible to the central-difference gradient. This causes **spurious pressure oscillations that don't affect velocity** - the simulation looks fine but pressure is meaningless.
+
+**Other issues**:
+- Slower convergence (larger spectral radius)
+- More complex boundary handling (2-cell-deep ghost regions)
+- Worse cache locality (distance-2 memory access)
+
+The MAC grid naturally avoids checkerboard instability because every pressure cell directly influences adjacent face velocities - there's no decoupled mode. This is why staggered grids became standard for incompressible flow.
+
+Collocated grids can work with fixes like **Rhie-Chow interpolation** to artificially couple neighbors, but the staggered approach is cleaner.
+
 ### Measuring Convergence
 
 The code includes a divergence statistics system that bins pre- and post-projection divergence values into a 2D histogram. This allows analysis of how well the solver is eliminating divergence across the domain.
