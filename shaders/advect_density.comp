@@ -1,0 +1,32 @@
+#version 430 core
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(rg32f, binding = 0) readonly uniform image2D velocity;
+layout(rgba32f, binding = 1) writeonly uniform image2D densityOut;
+
+uniform sampler2D densityIn;
+uniform float dt;
+uniform vec2 texelSize;
+uniform float dissipation;
+
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(velocity);
+
+    if (pos.x >= size.x || pos.y >= size.y) return;
+
+    vec2 uv = (vec2(pos) + 0.5) * texelSize;
+    vec2 vel = imageLoad(velocity, pos).xy;
+
+    // Trace back in time (velocity is in grid cells/sec, convert to UV space)
+    vec2 prevUV = uv - vel * texelSize * dt;
+
+    // Sample density at previous position
+    vec4 result = texture(densityIn, prevUV);
+
+    // Apply dissipation
+    result *= dissipation;
+
+    imageStore(densityOut, pos, result);
+}

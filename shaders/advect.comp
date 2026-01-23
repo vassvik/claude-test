@@ -1,0 +1,32 @@
+#version 430 core
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(rg32f, binding = 0) readonly uniform image2D velocityIn;
+layout(rg32f, binding = 1) writeonly uniform image2D velocityOut;
+
+uniform sampler2D fieldTex;
+uniform float dt;
+uniform vec2 texelSize;
+uniform float dissipation;
+
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(velocityIn);
+
+    if (pos.x >= size.x || pos.y >= size.y) return;
+
+    vec2 uv = (vec2(pos) + 0.5) * texelSize;
+    vec2 vel = imageLoad(velocityIn, pos).xy;
+
+    // Trace back in time (velocity is in grid cells/sec, convert to UV space)
+    vec2 prevUV = uv - vel * texelSize * dt;
+
+    // Sample the field at previous position using bilinear interpolation
+    vec2 result = texture(fieldTex, prevUV).xy;
+
+    // Apply dissipation
+    result *= dissipation;
+
+    imageStore(velocityOut, pos, vec4(result, 0.0, 0.0));
+}

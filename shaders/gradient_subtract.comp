@@ -1,0 +1,34 @@
+#version 430 core
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(r32f, binding = 0) readonly uniform image2D pressure;
+layout(rg32f, binding = 1) readonly uniform image2D velocityIn;
+layout(rg32f, binding = 2) writeonly uniform image2D velocityOut;
+
+uniform vec2 texelSize;
+
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(pressure);
+
+    if (pos.x >= size.x || pos.y >= size.y) return;
+
+    // Sample current and left/bottom pressures (backward difference for consistency with Laplacian)
+    float pC = imageLoad(pressure, pos).r;
+    float pL = (pos.x > 0) ? imageLoad(pressure, pos - ivec2(1, 0)).r : pC;
+    float pB = (pos.y > 0) ? imageLoad(pressure, pos - ivec2(0, 1)).r : pC;
+
+    // Compute pressure gradient using backward differences: grad = (p[i] - p[i-1], p[j] - p[j-1])
+    vec2 gradient = vec2(pC - pL, pC - pB);
+
+    // Subtract gradient from velocity to make it divergence-free
+    vec2 vel = imageLoad(velocityIn, pos).xy;
+    vel -= gradient;
+
+    // Free-slip boundary conditions: zero normal velocity, preserve tangential
+    if (pos.x == 0 || pos.x == size.x - 1) vel.x = 0.0;
+    if (pos.y == 0 || pos.y == size.y - 1) vel.y = 0.0;
+
+    imageStore(velocityOut, pos, vec4(vel, 0.0, 0.0));
+}

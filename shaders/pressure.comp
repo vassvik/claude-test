@@ -1,0 +1,37 @@
+#version 430 core
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(r32f, binding = 0) uniform image2D pressure;
+layout(r32f, binding = 1) readonly uniform image2D divergence;
+
+uniform int redPass;  // 1 for red cells, 0 for black cells
+uniform float omega;  // Over-relaxation factor (optimal ~1.99 for large grids)
+
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(pressure);
+
+    if (pos.x >= size.x || pos.y >= size.y) return;
+
+    // Red-black checkerboard: red cells have (x+y) even, black cells have (x+y) odd
+    int color = (pos.x + pos.y) & 1;
+    if (color != redPass) return;
+
+    // Sample neighboring pressures with standard 5-point stencil
+    float pL = (pos.x > 0) ? imageLoad(pressure, pos - ivec2(1, 0)).r : 0.0;
+    float pR = (pos.x < size.x - 1) ? imageLoad(pressure, pos + ivec2(1, 0)).r : 0.0;
+    float pB = (pos.y > 0) ? imageLoad(pressure, pos - ivec2(0, 1)).r : 0.0;
+    float pT = (pos.y < size.y - 1) ? imageLoad(pressure, pos + ivec2(0, 1)).r : 0.0;
+
+    float div = imageLoad(divergence, pos).r;
+
+    // Gauss-Seidel update: (pL + pR + pB + pT - 4*p) = div
+    float pNew = (pL + pR + pB + pT - div) * 0.25;
+
+    // SOR: blend old and new with over-relaxation
+    float pOld = imageLoad(pressure, pos).r;
+    float pSOR = pOld + omega * (pNew - pOld);
+
+    imageStore(pressure, pos, vec4(pSOR, 0.0, 0.0, 0.0));
+}
