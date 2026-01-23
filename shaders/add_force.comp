@@ -16,22 +16,30 @@ void main() {
 
     if (pos.x >= size.x || pos.y >= size.y) return;
 
-    vec2 uv = (vec2(pos) + 0.5) / vec2(size);
+    // MAC grid positions:
+    // u lives at left face (i, j+0.5), v lives at bottom face (i+0.5, j)
+    // density lives at cell center (i+0.5, j+0.5)
+    vec2 uv_u = vec2(float(pos.x), float(pos.y) + 0.5) / vec2(size);
+    vec2 uv_v = vec2(float(pos.x) + 0.5, float(pos.y)) / vec2(size);
+    vec2 uv_density = (vec2(pos) + 0.5) / vec2(size);
 
-    // Distance from mouse position
-    vec2 diff = uv - point;
-    float dist = length(diff);
+    // Compute separate influences for each staggered location
+    float dist_u = length(uv_u - point);
+    float dist_v = length(uv_v - point);
+    float dist_density = length(uv_density - point);
 
-    // Gaussian splat
-    float influence = exp(-dist * dist / (radius * radius));
+    float influence_u = exp(-dist_u * dist_u / (radius * radius));
+    float influence_v = exp(-dist_v * dist_v / (radius * radius));
+    float influence_density = exp(-dist_density * dist_density / (radius * radius));
 
-    // Add force to velocity (velocity in grid cells/sec)
+    // Add force to velocity at respective face locations
     vec2 vel = imageLoad(velocity, pos).xy;
-    vel += force * influence;
+    vel.x += force.x * influence_u;
+    vel.y += force.y * influence_v;
     imageStore(velocity, pos, vec4(vel, 0.0, 0.0));
 
-    // Add dye to density
+    // Add dye to density at cell center
     vec4 dye = imageLoad(density, pos);
-    dye.rgb += dyeColor * influence;
+    dye.rgb += dyeColor * influence_density;
     imageStore(density, pos, dye);
 }

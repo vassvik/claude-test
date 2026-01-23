@@ -16,17 +16,48 @@ void main() {
 
     if (pos.x >= size.x || pos.y >= size.y) return;
 
-    vec2 uv = (vec2(pos) + 0.5) * texelSize;
-    vec2 vel = imageLoad(velocityIn, pos).xy;
+    // MAC grid: u[i,j] at left face (i, j+0.5), v[i,j] at bottom face (i+0.5, j)
 
-    // Trace back in time (velocity is in grid cells/sec, convert to UV space)
-    vec2 prevUV = uv - vel * texelSize * dt;
+    // === Advect u component at left face (i, j+0.5) ===
+    vec2 uv_u = vec2(float(pos.x), float(pos.y) + 0.5) * texelSize;
 
-    // Sample the field at previous position using bilinear interpolation
-    vec2 result = texture(fieldTex, prevUV).xy;
+    // u is already at left face, need to interpolate v to left face
+    // v values are at bottom faces: v[i,j] at (i+0.5, j)
+    // Average 4 surrounding v values to get v at (i, j+0.5)
+    float v00 = (pos.x > 0) ? imageLoad(velocityIn, pos + ivec2(-1, 0)).y : 0.0;
+    float v10 = imageLoad(velocityIn, pos).y;
+    float v01 = (pos.x > 0 && pos.y < size.y - 1) ? imageLoad(velocityIn, pos + ivec2(-1, 1)).y : 0.0;
+    float v11 = (pos.y < size.y - 1) ? imageLoad(velocityIn, pos + ivec2(0, 1)).y : 0.0;
+
+    float u_here = imageLoad(velocityIn, pos).x;
+    float v_at_u = 0.25 * (v00 + v10 + v01 + v11);
+    vec2 vel_at_u = vec2(u_here, v_at_u);
+
+    // Trace back and sample u
+    vec2 prevUV_u = uv_u - vel_at_u * texelSize * dt;
+    float new_u = texture(fieldTex, prevUV_u).x;
+
+    // === Advect v component at bottom face (i+0.5, j) ===
+    vec2 uv_v = vec2(float(pos.x) + 0.5, float(pos.y)) * texelSize;
+
+    // v is already at bottom face, need to interpolate u to bottom face
+    // u values are at left faces: u[i,j] at (i, j+0.5)
+    // Average 4 surrounding u values to get u at (i+0.5, j)
+    float u00 = (pos.y > 0) ? imageLoad(velocityIn, pos + ivec2(0, -1)).x : 0.0;
+    float u10 = (pos.x < size.x - 1 && pos.y > 0) ? imageLoad(velocityIn, pos + ivec2(1, -1)).x : 0.0;
+    float u01 = imageLoad(velocityIn, pos).x;
+    float u11 = (pos.x < size.x - 1) ? imageLoad(velocityIn, pos + ivec2(1, 0)).x : 0.0;
+
+    float v_here = imageLoad(velocityIn, pos).y;
+    float u_at_v = 0.25 * (u00 + u10 + u01 + u11);
+    vec2 vel_at_v = vec2(u_at_v, v_here);
+
+    // Trace back and sample v
+    vec2 prevUV_v = uv_v - vel_at_v * texelSize * dt;
+    float new_v = texture(fieldTex, prevUV_v).y;
 
     // Apply dissipation
-    result *= dissipation;
+    vec2 result = vec2(new_u, new_v) * dissipation;
 
     imageStore(velocityOut, pos, vec4(result, 0.0, 0.0));
 }
