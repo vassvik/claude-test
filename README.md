@@ -102,11 +102,44 @@ Key insight: Each half-pass propagates information by roughly one cell. With 512
 - **More iterations than grid size**: Can use ω closer to theoretical optimal
 - **Fewer iterations than grid size**: Higher ω causes instability without improving convergence (information physically cannot propagate across the grid)
 
+### Consistent Operators
+
+A subtle but important consideration is **operator consistency** between the divergence, pressure solve, and gradient subtraction steps.
+
+The pressure Poisson equation arises from requiring the projected velocity to be divergence-free:
+
+```
+v_new = v - ∇p
+∇·v_new = 0
+∇·v - ∇·∇p = 0
+∇²p = ∇·v
+```
+
+For this to hold discretely, the **discrete Laplacian** used in the pressure solve must equal the **discrete divergence of the discrete gradient**:
+
+```
+L[p] = D[G[p]]
+```
+
+where L is the Laplacian stencil, D is the divergence operator, and G is the gradient operator.
+
+If these operators are consistent:
+- The divergence of the velocity field equals the residual of the pressure equation (up to sign/scale)
+- The post-projection divergence directly measures solver convergence
+- No "numerical divergence" is introduced by operator mismatch
+
+In this implementation:
+- **Divergence**: Central differences, `∇·v = (v_R - v_L + v_T - v_B) / 2h`
+- **Gradient**: Central differences, `∇p = ((p_R - p_L) / 2h, (p_T - p_B) / 2h)`
+- **Laplacian**: Standard 5-point stencil, `∇²p = (p_L + p_R + p_B + p_T - 4p) / h²`
+
+These are consistent: applying the discrete divergence to the discrete gradient yields the 5-point Laplacian (with appropriate scaling). This means we can measure convergence by looking at either the velocity divergence or the pressure equation residual - they should agree up to a constant factor.
+
 ### Measuring Convergence
 
 The code includes a divergence statistics system that bins pre- and post-projection divergence values into a 2D histogram. This allows analysis of how well the solver is eliminating divergence across the domain.
 
-The histogram uses log-scale bins (powers of 2) with an offset, so bin -24 represents near-zero divergence, while higher bins (-17, -16, etc.) represent increasing residual divergence.
+Because we use consistent operators, the post-projection divergence directly reflects solver convergence quality. The histogram uses log-scale bins (powers of 2) with an offset, so bin -24 represents near-zero divergence, while higher bins (-17, -16, etc.) represent increasing residual divergence.
 
 ## File Structure
 
