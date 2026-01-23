@@ -128,12 +128,30 @@ If these operators are consistent:
 - The post-projection divergence directly measures solver convergence
 - No "numerical divergence" is introduced by operator mismatch
 
-In this implementation:
-- **Divergence**: Central differences, `∇·v = (v_R - v_L + v_T - v_B) / 2h`
-- **Gradient**: Central differences, `∇p = ((p_R - p_L) / 2h, (p_T - p_B) / 2h)`
-- **Laplacian**: Standard 5-point stencil, `∇²p = (p_L + p_R + p_B + p_T - 4p) / h²`
+In this implementation we use the **narrow** 5-point Laplacian stencil:
+```
+∇²p = (p_L + p_R + p_B + p_T - 4p) / h²
+```
 
-These are consistent: applying the discrete divergence to the discrete gradient yields the 5-point Laplacian (with appropriate scaling). This means we can measure convergence by looking at either the velocity divergence or the pressure equation residual - they should agree up to a constant factor.
+To achieve consistency, we **cannot** use central differences for both divergence and gradient - that would yield a **wide** stencil using neighbors at distance 2. Instead:
+
+- **Divergence**: Forward differences
+  ```
+  ∇·v = (u[i+1,j] - u[i,j]) + (v[i,j+1] - v[i,j])
+  ```
+
+- **Gradient**: Backward differences
+  ```
+  ∇p = (p[i,j] - p[i-1,j], p[i,j] - p[i,j-1])
+  ```
+
+Composing these (applying divergence to gradient):
+```
+∇·(∇p) = (p[i+1] - p[i]) - (p[i] - p[i-1]) + (p[j+1] - p[j]) - (p[j] - p[j-1])
+       = p[i-1] + p[i+1] + p[j-1] + p[j+1] - 4p[i,j]
+```
+
+This exactly matches the narrow 5-point Laplacian, ensuring consistency. The divergence and pressure residual agree up to a constant factor, so we can measure solver convergence via either metric.
 
 ### Measuring Convergence
 
