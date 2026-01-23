@@ -221,6 +221,37 @@ The code is currently configured as a test harness for analyzing pressure solver
 
 To restore interactive mode, modify `main()` to use the window loop instead of `runOmegaSearch()`.
 
+## Session Notes (January 2025)
+
+### What Was Done
+1. **Implemented basic 2D Stable Fluids** with OpenGL compute shaders
+2. **Built convergence testing harness** - runs pressure solver with different iteration counts and omega values, outputs 2D histogram of pre/post divergence
+3. **Omega search** - empirically found optimal SOR omega for different iteration budgets:
+   - 512 iterations → ω ≈ 1.916
+   - 256 iterations → ω ≈ 1.96
+   - 128 iterations → ω ≈ 1.924
+4. **Discovered MAC grid interpretation** - the forward/backward difference combination for operator consistency naturally implies a staggered grid
+5. **Fixed all shaders for MAC consistency** - advection and force injection now respect staggered locations
+
+### Current State
+- Code is in **test harness mode** - runs omega search on startup, no interactive window loop
+- To restore interactive mode: modify `main()` to use the original window loop with mouse callbacks
+- All operators are now consistent with MAC grid interpretation
+
+### Key Insights Documented
+- Narrow 5-point Laplacian requires forward/backward differences (not central)
+- This implies MAC grid: u at left faces, v at bottom faces, p/density at centers
+- Wide Laplacian (central differences) causes checkerboard instability
+- Optimal omega is iteration-budget dependent, not just grid-size dependent
+- Theoretical ω_opt ≈ 1.988 assumes infinite iterations; practical optimal is lower
+
+### Potential Next Steps
+- Restore interactive mode with MAC-correct advection
+- Add viscosity (diffusion step)
+- Implement multigrid or other accelerated pressure solvers
+- Compare convergence of different solver strategies
+- Extend to 3D
+
 ## References
 
 - Stam, J. (1999). "Stable Fluids". SIGGRAPH 1999.
