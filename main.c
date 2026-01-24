@@ -15,8 +15,8 @@ __declspec(dllexport) unsigned long AmdPowerXpressRequestHighPerformance = 1;
 
 #define SIM_WIDTH 512
 #define SIM_HEIGHT 512
-#define WINDOW_WIDTH 800
-#define WINDOW_HEIGHT 800
+#define WINDOW_WIDTH 1536
+#define WINDOW_HEIGHT 1536
 
 // Solver parameters
 int pressureIterations = 128;
@@ -45,7 +45,8 @@ GLuint textVAO, textVBO;
 GLuint statsBuffer;
 
 // Textures for simulation
-GLuint velocityTex[2];
+GLuint uVelocityTex[2];  // R32F, u-component (horizontal velocity)
+GLuint vVelocityTex[2];  // R32F, v-component (vertical velocity)
 GLuint pressureTex[2];
 GLuint divergenceTex;
 GLuint postDivergenceTex;
@@ -71,9 +72,16 @@ float* clearDataRGBA = NULL;
 double lastMouseX = 0, lastMouseY = 0;
 int mousePressed = 0;
 
+// Pending force to apply (set by callback, applied in simulate)
+int hasPendingForce = 0;
+float pendingForceX = 0, pendingForceY = 0;
+float pendingForceDX = 0, pendingForceDY = 0;
+
 // Debug visualization
-int showVelocity = 0;
+// displayMode: 0=density, 1=velocity, 2=pre-divergence, 3=post-divergence
+int displayMode = 0;
 int showConvergence = 0;
+int debugTestMode = 0;  // Fixed impulse test mode for pressure solver debugging
 
 // Function prototypes
 char* loadShaderSource(const char* filename);
@@ -83,6 +91,7 @@ void createTextures(void);
 void createQuad(void);
 void simulate(float dt);
 void render(void);
+void addForce(float x, float y, float dx, float dy);
 
 char* loadShaderSource(const char* filename) {
     FILE* file = fopen(filename, "rb");
@@ -208,11 +217,22 @@ void clearTextureRGBA(GLuint tex) {
 }
 
 void createTextures(void) {
-    // Velocity textures (RG32F for 2D velocity)
-    glGenTextures(2, velocityTex);
+    // U-velocity textures (R32F for horizontal velocity component)
+    glGenTextures(2, uVelocityTex);
     for (int i = 0; i < 2; i++) {
-        glBindTexture(GL_TEXTURE_2D, velocityTex[i]);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RG32F, SIM_WIDTH, SIM_HEIGHT, 0, GL_RG, GL_FLOAT, NULL);
+        glBindTexture(GL_TEXTURE_2D, uVelocityTex[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, SIM_WIDTH, SIM_HEIGHT, 0, GL_RED, GL_FLOAT, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    }
+
+    // V-velocity textures (R32F for vertical velocity component)
+    glGenTextures(2, vVelocityTex);
+    for (int i = 0; i < 2; i++) {
+        glBindTexture(GL_TEXTURE_2D, vVelocityTex[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, SIM_WIDTH, SIM_HEIGHT, 0, GL_RED, GL_FLOAT, NULL);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -319,6 +339,32 @@ void getTopBins(int* preBins, int* preCounts, int* postBins, int* postCounts) {
                     break;
                 }
             }
+        }
+    }
+}
+
+void debugPrintMarginals(void) {
+    DivergenceStats2D stats;
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, statsBuffer);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(DivergenceStats2D), &stats);
+
+    unsigned int preSums[32] = {0};
+    unsigned int postSums[32] = {0};
+
+    for (int post = 0; post < 32; post++) {
+        for (int pre = 0; pre < 32; pre++) {
+            unsigned int count = stats.histogram[post * 32 + pre];
+            preSums[pre] += count;
+            postSums[post] += count;
+        }
+    }
+
+    printf("\n=== Marginal Sums ===\n");
+    printf("Bin  | Pre-count | Post-count\n");
+    printf("-----+-----------+-----------\n");
+    for (int b = 31; b >= 0; b--) {
+        if (preSums[b] > 0 || postSums[b] > 0) {
+            printf("%4d | %9u | %10u\n", b - 24, preSums[b], postSums[b]);
         }
     }
 }
@@ -585,29 +631,163 @@ void simulate(float dt) {
     int groupsX = (SIM_WIDTH + 15) / 16;
     int groupsY = (SIM_HEIGHT + 15) / 16;
 
-    // 1. Advect velocity
+    if (debugTestMode) {
+        // === DEBUG TEST MODE ===
+        // Fixed, repeating test case each frame:
+        // 1. Zero out velocity field
+        // 2. Set a single point impulse at center (creates known divergence)
+        // 3. Run pressure solve and projection
+        // 4. Observe pre vs post divergence
+
+        glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0, -1, "Debug Test Mode");
+
+        // 1. Clear velocity to zero
+        clearTextureR(uVelocityTex[currentVel]);
+        clearTextureR(vVelocityTex[currentVel]);
+
+        // 2. Set a 4x4 impulse at center
+        int cx = SIM_WIDTH / 2 - 2;
+        int cy = SIM_HEIGHT / 2 - 2;
+        float uImpulse[4 * 4];  // 4x4 pixels, u component
+        float vImpulse[4 * 4];  // 4x4 pixels, v component
+        for (int i = 0; i < 4 * 4; i++) {
+            uImpulse[i] = 1.0f;  // u velocity
+            vImpulse[i] = 0.0f;  // v velocity
+        }
+        glBindTexture(GL_TEXTURE_2D, uVelocityTex[currentVel]);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, cx, cy, 4, 4, GL_RED, GL_FLOAT, uImpulse);
+        glBindTexture(GL_TEXTURE_2D, vVelocityTex[currentVel]);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, cx, cy, 4, 4, GL_RED, GL_FLOAT, vImpulse);
+        // Ensure texture update is visible to compute shader image loads
+        glMemoryBarrier(GL_TEXTURE_UPDATE_BARRIER_BIT | GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+
+        // 3. Compute pre-divergence
+        glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0, -1, "Pre-Divergence");
+        glUseProgram(divergenceProgram);
+        glBindImageTexture(0, uVelocityTex[currentVel], 0, GL_FALSE, 0, GL_READ_ONLY, GL_R32F);
+        glBindImageTexture(1, vVelocityTex[currentVel], 0, GL_FALSE, 0, GL_READ_ONLY, GL_R32F);
+        glBindImageTexture(2, divergenceTex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
+        glDispatchCompute(groupsX, groupsY, 1);
+        glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+        glPopDebugGroup();
+
+        // 4. Pressure solve
+        glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0, -1, "Pressure Solve");
+        clearTextureR(pressureTex[currentPressure]);
+        glUseProgram(pressureProgram);
+        glUniform1f(glGetUniformLocation(pressureProgram, "omega"), pressureOmega);
+        glBindImageTexture(0, pressureTex[currentPressure], 0, GL_FALSE, 0, GL_READ_WRITE, GL_R32F);
+        glBindImageTexture(1, divergenceTex, 0, GL_FALSE, 0, GL_READ_ONLY, GL_R32F);
+
+        for (int i = 0; i < pressureIterations; i++) {
+            glUniform1i(glGetUniformLocation(pressureProgram, "redPass"), 1);
+            glDispatchCompute(groupsX, groupsY, 1);
+            glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+            glUniform1i(glGetUniformLocation(pressureProgram, "redPass"), 0);
+            glDispatchCompute(groupsX, groupsY, 1);
+            glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+        }
+        glPopDebugGroup();
+
+        // 5. Gradient subtraction (projection)
+        glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0, -1, "Gradient Subtract");
+        glUseProgram(gradientSubtractProgram);
+        glBindImageTexture(0, pressureTex[currentPressure], 0, GL_FALSE, 0, GL_READ_ONLY, GL_R32F);
+        glBindImageTexture(1, uVelocityTex[currentVel], 0, GL_FALSE, 0, GL_READ_ONLY, GL_R32F);
+        glBindImageTexture(2, vVelocityTex[currentVel], 0, GL_FALSE, 0, GL_READ_ONLY, GL_R32F);
+        glBindImageTexture(3, uVelocityTex[1 - currentVel], 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
+        glBindImageTexture(4, vVelocityTex[1 - currentVel], 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
+        glDispatchCompute(groupsX, groupsY, 1);
+        glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+        currentVel = 1 - currentVel;
+        glPopDebugGroup();
+
+        // 6. Compute post-divergence
+        glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0, -1, "Post-Divergence");
+        glUseProgram(divergenceProgram);
+        glBindImageTexture(0, uVelocityTex[currentVel], 0, GL_FALSE, 0, GL_READ_ONLY, GL_R32F);
+        glBindImageTexture(1, vVelocityTex[currentVel], 0, GL_FALSE, 0, GL_READ_ONLY, GL_R32F);
+        glBindImageTexture(2, postDivergenceTex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
+        glDispatchCompute(groupsX, groupsY, 1);
+        glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT);
+        glPopDebugGroup();
+
+        // Compute stats
+        glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0, -1, "Divergence Stats");
+        clearStats2D();
+        computeStats2D(divergenceTex, postDivergenceTex);
+        glPopDebugGroup();
+
+        glPopDebugGroup(); // End Debug Test Mode
+
+        // Skip density advection in test mode
+        return;
+    }
+
+    // === NORMAL SIMULATION MODE ===
+    // Order: advect density, advect velocity, (forces injected via mouse), project
+    // This ensures displayed velocity is always divergence-free
+
+    glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0, -1, "Normal Simulation");
+
+    // 1. Advect density using projected velocity from previous frame
+    glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0, -1, "Advect Density");
+    glUseProgram(advectDensityProgram);
+    glUniform1f(glGetUniformLocation(advectDensityProgram, "dt"), dt);
+    glUniform2f(glGetUniformLocation(advectDensityProgram, "texelSize"), 1.0f / SIM_WIDTH, 1.0f / SIM_HEIGHT);
+    glUniform1f(glGetUniformLocation(advectDensityProgram, "dissipation"), 0.999f);
+    glUniform1i(glGetUniformLocation(advectDensityProgram, "densityIn"), 0);
+    // Bind velocity as images (for imageLoad at discrete positions)
+    glBindImageTexture(0, uVelocityTex[currentVel], 0, GL_FALSE, 0, GL_READ_ONLY, GL_R32F);
+    glBindImageTexture(1, vVelocityTex[currentVel], 0, GL_FALSE, 0, GL_READ_ONLY, GL_R32F);
+    glBindImageTexture(2, densityTex[1 - currentDensity], 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA32F);
+    // Bind density input as sampler (for bilinear interpolation during backtracing)
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, densityTex[currentDensity]);
+    glDispatchCompute(groupsX, groupsY, 1);
+    glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT);
+    currentDensity = 1 - currentDensity;
+    glPopDebugGroup();
+
+    // 2. Advect velocity with itself
+    glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0, -1, "Advect Velocity");
     glUseProgram(advectProgram);
     glUniform1f(glGetUniformLocation(advectProgram, "dt"), dt);
     glUniform2f(glGetUniformLocation(advectProgram, "texelSize"), 1.0f / SIM_WIDTH, 1.0f / SIM_HEIGHT);
     glUniform1f(glGetUniformLocation(advectProgram, "dissipation"), 1.0f);
-    glUniform1i(glGetUniformLocation(advectProgram, "fieldTex"), 0);
-    glBindImageTexture(0, velocityTex[currentVel], 0, GL_FALSE, 0, GL_READ_ONLY, GL_RG32F);
-    glBindImageTexture(1, velocityTex[1 - currentVel], 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RG32F);
+    glUniform1i(glGetUniformLocation(advectProgram, "uVelocitySampler"), 0);
+    glUniform1i(glGetUniformLocation(advectProgram, "vVelocitySampler"), 1);
+    glBindImageTexture(0, uVelocityTex[1 - currentVel], 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
+    glBindImageTexture(1, vVelocityTex[1 - currentVel], 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, velocityTex[currentVel]);
+    glBindTexture(GL_TEXTURE_2D, uVelocityTex[currentVel]);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, vVelocityTex[currentVel]);
     glDispatchCompute(groupsX, groupsY, 1);
     glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT);
     currentVel = 1 - currentVel;
+    glPopDebugGroup();
 
-    // 2. Compute divergence
+    // 2b. Apply pending forces (after advection, before projection)
+    if (hasPendingForce && !debugTestMode) {
+        glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0, -1, "Add Force");
+        addForce(pendingForceX, pendingForceY, pendingForceDX, pendingForceDY);
+        hasPendingForce = 0;
+        glPopDebugGroup();
+    }
+
+    // 3. Compute pre-projection divergence
+    glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0, -1, "Pre-Divergence");
     glUseProgram(divergenceProgram);
-    glUniform2f(glGetUniformLocation(divergenceProgram, "texelSize"), 1.0f / SIM_WIDTH, 1.0f / SIM_HEIGHT);
-    glBindImageTexture(0, velocityTex[currentVel], 0, GL_FALSE, 0, GL_READ_ONLY, GL_RG32F);
-    glBindImageTexture(1, divergenceTex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
+    glBindImageTexture(0, uVelocityTex[currentVel], 0, GL_FALSE, 0, GL_READ_ONLY, GL_R32F);
+    glBindImageTexture(1, vVelocityTex[currentVel], 0, GL_FALSE, 0, GL_READ_ONLY, GL_R32F);
+    glBindImageTexture(2, divergenceTex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
     glDispatchCompute(groupsX, groupsY, 1);
     glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+    glPopDebugGroup();
 
-    // 3. Pressure solve (Red-Black SOR)
+    // 4. Pressure solve (Red-Black SOR)
+    glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0, -1, "Pressure Solve");
     clearTextureR(pressureTex[currentPressure]);
     glUseProgram(pressureProgram);
     glUniform1f(glGetUniformLocation(pressureProgram, "omega"), pressureOmega);
@@ -615,53 +795,51 @@ void simulate(float dt) {
     glBindImageTexture(1, divergenceTex, 0, GL_FALSE, 0, GL_READ_ONLY, GL_R32F);
 
     for (int i = 0; i < pressureIterations; i++) {
-        // Red pass
         glUniform1i(glGetUniformLocation(pressureProgram, "redPass"), 1);
         glDispatchCompute(groupsX, groupsY, 1);
         glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
-        // Black pass
         glUniform1i(glGetUniformLocation(pressureProgram, "redPass"), 0);
         glDispatchCompute(groupsX, groupsY, 1);
         glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
     }
+    glPopDebugGroup();
 
-    // 4. Gradient subtraction (projection)
+    // 5. Gradient subtraction (projection) - final step
+    glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0, -1, "Gradient Subtract");
     glUseProgram(gradientSubtractProgram);
-    glUniform2f(glGetUniformLocation(gradientSubtractProgram, "texelSize"), 1.0f / SIM_WIDTH, 1.0f / SIM_HEIGHT);
     glBindImageTexture(0, pressureTex[currentPressure], 0, GL_FALSE, 0, GL_READ_ONLY, GL_R32F);
-    glBindImageTexture(1, velocityTex[currentVel], 0, GL_FALSE, 0, GL_READ_ONLY, GL_RG32F);
-    glBindImageTexture(2, velocityTex[1 - currentVel], 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RG32F);
+    glBindImageTexture(1, uVelocityTex[currentVel], 0, GL_FALSE, 0, GL_READ_ONLY, GL_R32F);
+    glBindImageTexture(2, vVelocityTex[currentVel], 0, GL_FALSE, 0, GL_READ_ONLY, GL_R32F);
+    glBindImageTexture(3, uVelocityTex[1 - currentVel], 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
+    glBindImageTexture(4, vVelocityTex[1 - currentVel], 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
     glDispatchCompute(groupsX, groupsY, 1);
     glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
     currentVel = 1 - currentVel;
+    glPopDebugGroup();
 
-    // Compute post-divergence into separate texture (pre-divergence preserved in divergenceTex)
+    // Compute post-divergence for visualization
+    glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0, -1, "Post-Divergence");
     glUseProgram(divergenceProgram);
-    glBindImageTexture(0, velocityTex[currentVel], 0, GL_FALSE, 0, GL_READ_ONLY, GL_RG32F);
-    glBindImageTexture(1, postDivergenceTex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
-    glDispatchCompute(groupsX, groupsY, 1);
-    glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
-
-    // Compute 2D stats (table printed by caller when needed)
-    clearStats2D();
-    computeStats2D(divergenceTex, postDivergenceTex);
-
-    // 5. Advect density using divergence-free velocity
-    glUseProgram(advectDensityProgram);
-    glUniform1f(glGetUniformLocation(advectDensityProgram, "dt"), dt);
-    glUniform2f(glGetUniformLocation(advectDensityProgram, "texelSize"), 1.0f / SIM_WIDTH, 1.0f / SIM_HEIGHT);
-    glUniform1f(glGetUniformLocation(advectDensityProgram, "dissipation"), 0.999f);
-    glUniform1i(glGetUniformLocation(advectDensityProgram, "densityIn"), 0);
-    glBindImageTexture(0, velocityTex[currentVel], 0, GL_FALSE, 0, GL_READ_ONLY, GL_RG32F);
-    glBindImageTexture(1, densityTex[1 - currentDensity], 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA32F);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, densityTex[currentDensity]);
+    glBindImageTexture(0, uVelocityTex[currentVel], 0, GL_FALSE, 0, GL_READ_ONLY, GL_R32F);
+    glBindImageTexture(1, vVelocityTex[currentVel], 0, GL_FALSE, 0, GL_READ_ONLY, GL_R32F);
+    glBindImageTexture(2, postDivergenceTex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
     glDispatchCompute(groupsX, groupsY, 1);
     glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT);
-    currentDensity = 1 - currentDensity;
+    glPopDebugGroup();
+
+    // Compute stats
+    glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0, -1, "Divergence Stats");
+    clearStats2D();
+    computeStats2D(divergenceTex, postDivergenceTex);
+    glPopDebugGroup();
+
+    glPopDebugGroup(); // End Normal Simulation
 }
 
 void addForce(float x, float y, float dx, float dy) {
+    // Ignore mouse input in debug test mode
+    if (debugTestMode) return;
+
     int groupsX = (SIM_WIDTH + 15) / 16;
     int groupsY = (SIM_HEIGHT + 15) / 16;
 
@@ -683,33 +861,62 @@ void addForce(float x, float y, float dx, float dy) {
     glUniform1f(glGetUniformLocation(addForceProgram, "radius"), 0.02f);
     glUniform3f(glGetUniformLocation(addForceProgram, "dyeColor"), r, g, b);
 
-    glBindImageTexture(0, velocityTex[currentVel], 0, GL_FALSE, 0, GL_READ_WRITE, GL_RG32F);
-    glBindImageTexture(1, densityTex[currentDensity], 0, GL_FALSE, 0, GL_READ_WRITE, GL_RGBA32F);
+    glBindImageTexture(0, uVelocityTex[currentVel], 0, GL_FALSE, 0, GL_READ_WRITE, GL_R32F);
+    glBindImageTexture(1, vVelocityTex[currentVel], 0, GL_FALSE, 0, GL_READ_WRITE, GL_R32F);
+    glBindImageTexture(2, densityTex[currentDensity], 0, GL_FALSE, 0, GL_READ_WRITE, GL_RGBA32F);
     glDispatchCompute(groupsX, groupsY, 1);
     glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
 }
 
 void render(void) {
+    glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0, -1, "Render");
     glClear(GL_COLOR_BUFFER_BIT);
 
     glUseProgram(renderProgram);
+
+    // Bind density texture to unit 0
     glActiveTexture(GL_TEXTURE0);
-    if (showVelocity) {
-        glBindTexture(GL_TEXTURE_2D, velocityTex[currentVel]);
-    } else {
-        glBindTexture(GL_TEXTURE_2D, densityTex[currentDensity]);
-    }
+    glBindTexture(GL_TEXTURE_2D, densityTex[currentDensity]);
     glUniform1i(glGetUniformLocation(renderProgram, "densityTex"), 0);
-    glUniform1i(glGetUniformLocation(renderProgram, "showVelocity"), showVelocity);
+
+    // Bind divergence/pressure texture to unit 1
+    glActiveTexture(GL_TEXTURE1);
+    if (displayMode == 2) {
+        glBindTexture(GL_TEXTURE_2D, divergenceTex);  // Pre-projection
+    } else if (displayMode == 3) {
+        glBindTexture(GL_TEXTURE_2D, postDivergenceTex);  // Post-projection
+    } else if (displayMode == 4) {
+        glBindTexture(GL_TEXTURE_2D, pressureTex[currentPressure]);  // Pressure
+    } else {
+        glBindTexture(GL_TEXTURE_2D, divergenceTex);  // Default
+    }
+    glUniform1i(glGetUniformLocation(renderProgram, "divergenceTex"), 1);
+
+    // Bind velocity textures to units 2 and 3 for velocity visualization
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, uVelocityTex[currentVel]);
+    glUniform1i(glGetUniformLocation(renderProgram, "uVelocityTex"), 2);
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D, vVelocityTex[currentVel]);
+    glUniform1i(glGetUniformLocation(renderProgram, "vVelocityTex"), 3);
+
+    // Set display mode (shader uses 2 for pre/post divergence, 3 for pressure)
+    int shaderMode = displayMode;
+    if (displayMode == 3) shaderMode = 2;  // post-divergence uses same shader as pre
+    if (displayMode == 4) shaderMode = 3;  // pressure mode
+    glUniform1i(glGetUniformLocation(renderProgram, "displayMode"), shaderMode);
 
     glBindVertexArray(quadVAO);
     glDrawArrays(GL_TRIANGLES, 0, 6);
+    glPopDebugGroup();
 }
 
 void setupImpulseTest(void) {
     // Clear all textures first
-    clearTextureRG(velocityTex[0]);
-    clearTextureRG(velocityTex[1]);
+    clearTextureR(uVelocityTex[0]);
+    clearTextureR(uVelocityTex[1]);
+    clearTextureR(vVelocityTex[0]);
+    clearTextureR(vVelocityTex[1]);
     clearTextureRGBA(densityTex[0]);
     clearTextureRGBA(densityTex[1]);
     clearTextureR(pressureTex[0]);
@@ -721,10 +928,13 @@ void setupImpulseTest(void) {
     // Set a single point impulse at center
     int cx = SIM_WIDTH / 2;
     int cy = SIM_HEIGHT / 2;
-    float impulse[2] = {1.0f, 0.0f};  // Velocity pointing right
+    float uImpulse = 1.0f;  // u velocity pointing right
+    float vImpulse = 0.0f;  // v velocity
 
-    glBindTexture(GL_TEXTURE_2D, velocityTex[currentVel]);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, cx, cy, 1, 1, GL_RG, GL_FLOAT, impulse);
+    glBindTexture(GL_TEXTURE_2D, uVelocityTex[currentVel]);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, cx, cy, 1, 1, GL_RED, GL_FLOAT, &uImpulse);
+    glBindTexture(GL_TEXTURE_2D, vVelocityTex[currentVel]);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, cx, cy, 1, 1, GL_RED, GL_FLOAT, &vImpulse);
 }
 
 // Returns: largest non-zero bin index (0-31), and count in that bin via pointer
@@ -804,12 +1014,12 @@ void cursorPosCallback(GLFWwindow* window, double xpos, double ypos) {
         int width, height;
         glfwGetWindowSize(window, &width, &height);
 
-        float x = (float)xpos / width;
-        float y = 1.0f - (float)ypos / height;
-        float fdx = (float)dx / width;
-        float fdy = -(float)dy / height;
-
-        addForce(x, y, fdx, fdy);
+        // Store pending force to be applied in simulate() at the right time
+        pendingForceX = (float)xpos / width;
+        pendingForceY = 1.0f - (float)ypos / height;
+        pendingForceDX = (float)dx / width;
+        pendingForceDY = -(float)dy / height;
+        hasPendingForce = 1;
     }
     lastMouseX = xpos;
     lastMouseY = ypos;
@@ -827,20 +1037,39 @@ void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods
     }
     if (key == GLFW_KEY_R && action == GLFW_PRESS) {
         // Reset simulation
-        clearTextureRG(velocityTex[0]);
-        clearTextureRG(velocityTex[1]);
+        clearTextureR(uVelocityTex[0]);
+        clearTextureR(uVelocityTex[1]);
+        clearTextureR(vVelocityTex[0]);
+        clearTextureR(vVelocityTex[1]);
         clearTextureRGBA(densityTex[0]);
         clearTextureRGBA(densityTex[1]);
         clearTextureR(pressureTex[0]);
         clearTextureR(pressureTex[1]);
     }
     if (key == GLFW_KEY_V && action == GLFW_PRESS) {
-        showVelocity = !showVelocity;
-        printf("Showing: %s\n", showVelocity ? "velocity" : "density");
+        displayMode = (displayMode + 1) % 5;
+        const char* modeNames[] = {"density", "velocity", "pre-divergence", "post-divergence", "pressure"};
+        printf("Display mode: %s\n", modeNames[displayMode]);
     }
     if (key == GLFW_KEY_C && action == GLFW_PRESS) {
         showConvergence = !showConvergence;
         printf("Convergence stats: %s\n", showConvergence ? "on" : "off");
+        if (showConvergence) {
+            printStats2DTable();
+            debugPrintMarginals();
+        }
+    }
+    if (key == GLFW_KEY_T && action == GLFW_PRESS) {
+        debugTestMode = !debugTestMode;
+        printf("Debug test mode: %s\n", debugTestMode ? "ON (fixed impulse at center)" : "OFF (normal simulation)");
+        if (debugTestMode) {
+            // Auto-enable convergence stats and switch to pre-divergence view
+            showConvergence = 1;
+            displayMode = 2;  // pre-divergence view
+            printf("  -> Auto-enabled convergence stats, showing pre-divergence\n");
+            printf("  -> Press V to cycle: pre-divergence -> post-divergence -> pressure\n");
+            printf("  -> Expected: pre-divergence shows point, post-divergence should be ~black\n");
+        }
     }
 }
 
@@ -907,8 +1136,10 @@ int main(void) {
     glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(DivergenceStats2D), NULL, GL_DYNAMIC_READ);
 
     // Initialize all simulation textures to zero
-    clearTextureRG(velocityTex[0]);
-    clearTextureRG(velocityTex[1]);
+    clearTextureR(uVelocityTex[0]);
+    clearTextureR(uVelocityTex[1]);
+    clearTextureR(vVelocityTex[0]);
+    clearTextureR(vVelocityTex[1]);
     clearTextureRGBA(densityTex[0]);
     clearTextureRGBA(densityTex[1]);
     clearTextureR(pressureTex[0]);
@@ -917,14 +1148,15 @@ int main(void) {
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 
     // Set solver parameters for interactive use
-    pressureIterations = 100;
+    pressureIterations = 512;
     pressureOmega = 1.9f;
 
     printf("Controls:\n");
     printf("  Left mouse + drag: Add velocity and dye\n");
     printf("  R: Reset simulation\n");
-    printf("  V: Toggle velocity visualization\n");
+    printf("  V: Cycle display mode (density/velocity/pre-div/post-div/pressure)\n");
     printf("  C: Toggle convergence stats\n");
+    printf("  T: Toggle debug test mode (fixed impulse for pressure solver debugging)\n");
     printf("  ESC: Quit\n");
 
     double lastTime = glfwGetTime();
@@ -965,6 +1197,14 @@ int main(void) {
         snprintf(buf, sizeof(buf), "Grid: %dx%d", SIM_WIDTH, SIM_HEIGHT);
         renderText(buf, 10, 70, 2.0f, 1.0f, 1.0f, 1.0f);
 
+        const char* modeNames[] = {"DENSITY", "VELOCITY", "PRE-DIVERGENCE", "POST-DIVERGENCE", "PRESSURE"};
+        snprintf(buf, sizeof(buf), "View: %s", modeNames[displayMode]);
+        renderText(buf, 10, 90, 2.0f, 1.0f, 1.0f, 0.0f);
+
+        if (debugTestMode) {
+            renderText("DEBUG TEST MODE (T to toggle)", 10, 110, 2.0f, 1.0f, 0.3f, 0.3f);
+        }
+
         if (showConvergence) {
             int preBins[3], preCounts[3], postBins[3], postCounts[3];
             getTopBins(preBins, preCounts, postBins, postCounts);
@@ -1003,7 +1243,8 @@ int main(void) {
 
     glDeleteBuffers(1, &statsBuffer);
 
-    glDeleteTextures(2, velocityTex);
+    glDeleteTextures(2, uVelocityTex);
+    glDeleteTextures(2, vVelocityTex);
     glDeleteTextures(2, pressureTex);
     glDeleteTextures(1, &divergenceTex);
     glDeleteTextures(1, &postDivergenceTex);

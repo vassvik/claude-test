@@ -3,10 +3,10 @@
 layout(local_size_x = 16, local_size_y = 16) in;
 
 layout(r32f, binding = 0) readonly uniform image2D pressure;
-layout(rg32f, binding = 1) readonly uniform image2D velocityIn;
-layout(rg32f, binding = 2) writeonly uniform image2D velocityOut;
-
-uniform vec2 texelSize;
+layout(r32f, binding = 1) readonly uniform image2D uVelocityIn;
+layout(r32f, binding = 2) readonly uniform image2D vVelocityIn;
+layout(r32f, binding = 3) writeonly uniform image2D uVelocityOut;
+layout(r32f, binding = 4) writeonly uniform image2D vVelocityOut;
 
 void main() {
     ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
@@ -15,18 +15,24 @@ void main() {
     if (pos.x >= size.x || pos.y >= size.y) return;
 
     // Sample current and left/bottom pressures (backward difference for consistency with Laplacian)
-    // Dirichlet BC: p = 0 outside domain (open boundary)
     float pC = imageLoad(pressure, pos).r;
-    float pL = (pos.x > 0) ? imageLoad(pressure, pos - ivec2(1, 0)).r : 0.0;
-    float pB = (pos.y > 0) ? imageLoad(pressure, pos - ivec2(0, 1)).r : 0.0;
+    float pL = (pos.x > 0) ? imageLoad(pressure, pos - ivec2(1, 0)).r : pC;
+    float pB = (pos.y > 0) ? imageLoad(pressure, pos - ivec2(0, 1)).r : pC;
 
     // Compute pressure gradient using backward differences: grad = (p[i] - p[i-1], p[j] - p[j-1])
-    vec2 gradient = vec2(pC - pL, pC - pB);
+    float gradX = pC - pL;
+    float gradY = pC - pB;
 
     // Subtract gradient from velocity to make it divergence-free
-    // Open boundaries: no clamping, flow can exit freely
-    vec2 vel = imageLoad(velocityIn, pos).xy;
-    vel -= gradient;
+    float u = imageLoad(uVelocityIn, pos).r;
+    float v = imageLoad(vVelocityIn, pos).r;
+    u -= gradX;
+    v -= gradY;
 
-    imageStore(velocityOut, pos, vec4(vel, 0.0, 0.0));
+    // Free-slip boundary conditions: zero normal velocity at walls
+    if (pos.x == 0 || pos.x == size.x - 1) u = 0.0;
+    if (pos.y == 0 || pos.y == size.y - 1) v = 0.0;
+
+    imageStore(uVelocityOut, pos, vec4(u, 0.0, 0.0, 0.0));
+    imageStore(vVelocityOut, pos, vec4(v, 0.0, 0.0, 0.0));
 }

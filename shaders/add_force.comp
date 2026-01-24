@@ -2,8 +2,9 @@
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
-layout(rg32f, binding = 0) uniform image2D velocity;
-layout(rgba32f, binding = 1) uniform image2D density;
+layout(r32f, binding = 0) uniform image2D uVelocity;
+layout(r32f, binding = 1) uniform image2D vVelocity;
+layout(rgba32f, binding = 2) uniform image2D density;
 
 uniform vec2 point;      // Position of force application (0-1)
 uniform vec2 force;      // Force direction and magnitude (grid cells/sec)
@@ -12,7 +13,7 @@ uniform vec3 dyeColor;   // Color to inject
 
 void main() {
     ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
-    ivec2 size = imageSize(velocity);
+    ivec2 size = imageSize(uVelocity);
 
     if (pos.x >= size.x || pos.y >= size.y) return;
 
@@ -33,10 +34,12 @@ void main() {
     float influence_density = exp(-dist_density * dist_density / (radius * radius));
 
     // Add force to velocity at respective face locations
-    vec2 vel = imageLoad(velocity, pos).xy;
-    vel.x += force.x * influence_u;
-    vel.y += force.y * influence_v;
-    imageStore(velocity, pos, vec4(vel, 0.0, 0.0));
+    float u = imageLoad(uVelocity, pos).r;
+    float v = imageLoad(vVelocity, pos).r;
+    u += force.x * influence_u;
+    v += force.y * influence_v;
+    imageStore(uVelocity, pos, vec4(u, 0.0, 0.0, 0.0));
+    imageStore(vVelocity, pos, vec4(v, 0.0, 0.0, 0.0));
 
     // Add dye to density at cell center
     vec4 dye = imageLoad(density, pos);

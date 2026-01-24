@@ -2,17 +2,18 @@
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
-layout(rg32f, binding = 0) readonly uniform image2D velocityIn;
-layout(rg32f, binding = 1) writeonly uniform image2D velocityOut;
+layout(r32f, binding = 0) writeonly uniform image2D uVelocityOut;
+layout(r32f, binding = 1) writeonly uniform image2D vVelocityOut;
 
-uniform sampler2D fieldTex;
+uniform sampler2D uVelocitySampler;
+uniform sampler2D vVelocitySampler;
 uniform float dt;
 uniform vec2 texelSize;
 uniform float dissipation;
 
 void main() {
     ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
-    ivec2 size = imageSize(velocityIn);
+    ivec2 size = imageSize(uVelocityOut);
 
     if (pos.x >= size.x || pos.y >= size.y) return;
 
@@ -24,18 +25,19 @@ void main() {
     // u is already at left face, need to interpolate v to left face
     // v values are at bottom faces: v[i,j] at (i+0.5, j)
     // Average 4 surrounding v values to get v at (i, j+0.5)
-    float v00 = (pos.x > 0) ? imageLoad(velocityIn, pos + ivec2(-1, 0)).y : 0.0;
-    float v10 = imageLoad(velocityIn, pos).y;
-    float v01 = (pos.x > 0 && pos.y < size.y - 1) ? imageLoad(velocityIn, pos + ivec2(-1, 1)).y : 0.0;
-    float v11 = (pos.y < size.y - 1) ? imageLoad(velocityIn, pos + ivec2(0, 1)).y : 0.0;
+    vec2 vSamplePos = (vec2(pos) + 0.5) * texelSize;
+    float v00 = texture(vVelocitySampler, vSamplePos + vec2(-1.0, 0.0) * texelSize).r;
+    float v10 = texture(vVelocitySampler, vSamplePos).r;
+    float v01 = texture(vVelocitySampler, vSamplePos + vec2(-1.0, 1.0) * texelSize).r;
+    float v11 = texture(vVelocitySampler, vSamplePos + vec2(0.0, 1.0) * texelSize).r;
 
-    float u_here = imageLoad(velocityIn, pos).x;
+    float u_here = texture(uVelocitySampler, uv_u).r;
     float v_at_u = 0.25 * (v00 + v10 + v01 + v11);
     vec2 vel_at_u = vec2(u_here, v_at_u);
 
     // Trace back and sample u
     vec2 prevUV_u = uv_u - vel_at_u * texelSize * dt;
-    float new_u = texture(fieldTex, prevUV_u).x;
+    float new_u = texture(uVelocitySampler, prevUV_u).r;
 
     // === Advect v component at bottom face (i+0.5, j) ===
     vec2 uv_v = vec2(float(pos.x) + 0.5, float(pos.y)) * texelSize;
@@ -43,21 +45,24 @@ void main() {
     // v is already at bottom face, need to interpolate u to bottom face
     // u values are at left faces: u[i,j] at (i, j+0.5)
     // Average 4 surrounding u values to get u at (i+0.5, j)
-    float u00 = (pos.y > 0) ? imageLoad(velocityIn, pos + ivec2(0, -1)).x : 0.0;
-    float u10 = (pos.x < size.x - 1 && pos.y > 0) ? imageLoad(velocityIn, pos + ivec2(1, -1)).x : 0.0;
-    float u01 = imageLoad(velocityIn, pos).x;
-    float u11 = (pos.x < size.x - 1) ? imageLoad(velocityIn, pos + ivec2(1, 0)).x : 0.0;
+    vec2 uSamplePos = (vec2(pos) + 0.5) * texelSize;
+    float u00 = texture(uVelocitySampler, uSamplePos + vec2(0.0, -1.0) * texelSize).r;
+    float u10 = texture(uVelocitySampler, uSamplePos + vec2(1.0, -1.0) * texelSize).r;
+    float u01 = texture(uVelocitySampler, uSamplePos).r;
+    float u11 = texture(uVelocitySampler, uSamplePos + vec2(1.0, 0.0) * texelSize).r;
 
-    float v_here = imageLoad(velocityIn, pos).y;
+    float v_here = texture(vVelocitySampler, uv_v).r;
     float u_at_v = 0.25 * (u00 + u10 + u01 + u11);
     vec2 vel_at_v = vec2(u_at_v, v_here);
 
     // Trace back and sample v
     vec2 prevUV_v = uv_v - vel_at_v * texelSize * dt;
-    float new_v = texture(fieldTex, prevUV_v).y;
+    float new_v = texture(vVelocitySampler, prevUV_v).r;
 
     // Apply dissipation
-    vec2 result = vec2(new_u, new_v) * dissipation;
+    new_u *= dissipation;
+    new_v *= dissipation;
 
-    imageStore(velocityOut, pos, vec4(result, 0.0, 0.0));
+    imageStore(uVelocityOut, pos, vec4(new_u, 0.0, 0.0, 0.0));
+    imageStore(vVelocityOut, pos, vec4(new_v, 0.0, 0.0, 0.0));
 }
