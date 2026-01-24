@@ -1,0 +1,31 @@
+#version 430 core
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// u-velocity grid: 513x512
+layout(r32f, binding = 0) uniform image2D uVelocity;
+
+uniform vec2 point;      // Position of force application (0-1 in cell-center space)
+uniform float forceX;    // Force x-component (grid cells/sec)
+uniform float radius;    // Radius of influence (in UV space)
+uniform ivec2 uSize;     // 513x512
+
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+
+    if (pos.x >= uSize.x || pos.y >= uSize.y) return;
+
+    // u[i,j] lives at vertical face position (i, j+0.5) in world space
+    // Convert to normalized (0-1) cell-center space for distance calculation
+    // Cell centers are at (i+0.5, j+0.5), u face is at (i, j+0.5)
+    // In 512x512 cell grid, normalize to 0-1 range
+    vec2 uv_u = vec2(float(pos.x), float(pos.y) + 0.5) / vec2(512.0, 512.0);
+
+    float dist = length(uv_u - point);
+    float influence = exp(-dist * dist / (radius * radius));
+
+    float u = imageLoad(uVelocity, pos).r;
+    u += forceX * influence;
+    u = clamp(u, -3840.0, 3840.0);  // Max 64 cells/step at 60fps
+    imageStore(uVelocity, pos, vec4(u, 0.0, 0.0, 0.0));
+}

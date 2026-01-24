@@ -2,31 +2,38 @@
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
+// Proper MAC grid dimensions:
+// uVelocity: 513x512 (vertical faces)
+// vVelocity: 512x513 (horizontal faces)
+// density: 512x512 (cell centers)
+
 layout(r32f, binding = 0) readonly uniform image2D uVelocity;
 layout(r32f, binding = 1) readonly uniform image2D vVelocity;
 layout(rgba32f, binding = 2) writeonly uniform image2D densityOut;
 
 uniform sampler2D densityIn;
 uniform float dt;
-uniform vec2 texelSize;
+uniform vec2 texelSize;  // 1/512 for density grid
 uniform float dissipation;
 
 void main() {
     ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
-    ivec2 size = imageSize(uVelocity);
+    ivec2 size = imageSize(densityOut);
 
     if (pos.x >= size.x || pos.y >= size.y) return;
 
-    // Density lives at cell center (i+0.5, j+0.5)
+    // Density lives at cell center (i+0.5, j+0.5) in grid space
     vec2 uv = (vec2(pos) + 0.5) * texelSize;
 
-    // Interpolate velocity to cell center (MAC grid)
-    // u lives at left faces, so average u[i,j] and u[i+1,j] to get u at center
-    // v lives at bottom faces, so average v[i,j] and v[i,j+1] to get v at center
+    // Interpolate velocity to cell center using MAC grid layout
+    // For cell [i,j]:
+    // - u at left face = u[i,j], u at right face = u[i+1,j]
+    // - v at bottom face = v[i,j], v at top face = v[i,j+1]
+    // All reads are in-bounds with proper MAC dimensions
     float u_left = imageLoad(uVelocity, pos).r;
-    float u_right = (pos.x < size.x - 1) ? imageLoad(uVelocity, pos + ivec2(1, 0)).r : u_left;
+    float u_right = imageLoad(uVelocity, pos + ivec2(1, 0)).r;
     float v_bottom = imageLoad(vVelocity, pos).r;
-    float v_top = (pos.y < size.y - 1) ? imageLoad(vVelocity, pos + ivec2(0, 1)).r : v_bottom;
+    float v_top = imageLoad(vVelocity, pos + ivec2(0, 1)).r;
 
     vec2 vel = vec2(0.5 * (u_left + u_right), 0.5 * (v_bottom + v_top));
 

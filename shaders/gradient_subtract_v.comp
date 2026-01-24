@@ -1,0 +1,32 @@
+#version 430 core
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// v-velocity grid: 512x513
+layout(r32f, binding = 0) readonly uniform image2D pressure;      // 512x512
+layout(r32f, binding = 1) readonly uniform image2D vVelocityIn;   // 512x513
+layout(r32f, binding = 2) writeonly uniform image2D vVelocityOut; // 512x513
+
+uniform ivec2 vSize;       // 512x513
+uniform ivec2 pressSize;   // 512x512
+
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+
+    if (pos.x >= vSize.x || pos.y >= vSize.y) return;
+
+    // v[i,j] lives at horizontal face between cell (i,j-1) and cell (i,j)
+    // Gradient: v -= p[i,j] - p[i,j-1]
+    // If j >= pressSize.y (i.e., j >= 512), p[i,j] is out of bounds -> treat as 0
+    // If j-1 < 0, p[i,j-1] is out of bounds -> treat as 0
+
+    float pTop = (pos.y < pressSize.y) ? imageLoad(pressure, pos).r : 0.0;
+    float pBottom = (pos.y > 0) ? imageLoad(pressure, ivec2(pos.x, pos.y - 1)).r : 0.0;
+
+    float gradY = pTop - pBottom;
+
+    float v = imageLoad(vVelocityIn, pos).r;
+    v -= gradY;
+
+    imageStore(vVelocityOut, pos, vec4(v, 0.0, 0.0, 0.0));
+}

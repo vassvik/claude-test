@@ -5,12 +5,17 @@ layout(r32f, binding = 0) readonly uniform image2D preDivergence;
 layout(r32f, binding = 1) readonly uniform image2D postDivergence;
 
 layout(std430, binding = 0) buffer StatsBuffer {
-    uint histogram[32 * 32];  // [postBin * 32 + preBin]
+    uint histogram[1152];  // 32*36 = [postBin * 36 + preBin], pre-bins 0-35, post-bins 0-31
 };
 
-int getBin(float div) {
-    float absDiv = abs(div);
-    return clamp(int(log2(absDiv)) + 24, 0, 31);
+// Pre-divergence bin: 36 bins (0-35), range 2^-24 to 2^11 = 2048
+int getPreBin(float div) {
+    return int(clamp(log2(abs(div)) + 24.0, 0.0, 35.0));
+}
+
+// Post-divergence bin: 32 bins (0-31), range 2^-24 to 2^7 = 128
+int getPostBin(float div) {
+    return int(clamp(log2(abs(div)) + 24.0, 0.0, 31.0));
 }
 
 void main() {
@@ -21,8 +26,8 @@ void main() {
     float preDiv = imageLoad(preDivergence, pos).r;
     float postDiv = imageLoad(postDivergence, pos).r;
 
-    int preBin = getBin(preDiv);
-    int postBin = getBin(postDiv);
+    int preBin = getPreBin(preDiv);
+    int postBin = getPostBin(postDiv);
 
-    atomicAdd(histogram[postBin * 32 + preBin], 1u);
+    atomicAdd(histogram[postBin * 36 + preBin], 1u);
 }

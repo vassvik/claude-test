@@ -1,0 +1,54 @@
+#version 430 core
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// v-velocity grid: 512x513 (one extra row for horizontal faces)
+layout(r32f, binding = 0) writeonly uniform image2D vVelocityOut;
+
+uniform sampler2D uVelocitySampler;  // 513x512
+uniform sampler2D vVelocitySampler;  // 512x513
+uniform float dt;
+uniform float dissipation;
+
+// Grid dimensions
+uniform ivec2 uSize;  // 513x512
+uniform ivec2 vSize;  // 512x513
+
+// Sample u-velocity at world position (wx, wy)
+// u[i,j] is stored at texel [i,j] and represents velocity at world pos (i, j+0.5)
+float sampleU(vec2 worldPos) {
+    vec2 uv = vec2((worldPos.x + 0.5) / float(uSize.x), worldPos.y / float(uSize.y));
+    return texture(uVelocitySampler, uv).r;
+}
+
+// Sample v-velocity at world position (wx, wy)
+// v[i,j] is stored at texel [i,j] and represents velocity at world pos (i+0.5, j)
+float sampleV(vec2 worldPos) {
+    vec2 uv = vec2(worldPos.x / float(vSize.x), (worldPos.y + 0.5) / float(vSize.y));
+    return texture(vVelocitySampler, uv).r;
+}
+
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+
+    if (pos.x >= vSize.x || pos.y >= vSize.y) return;
+
+    // v[pos.x, pos.y] lives at world position (pos.x + 0.5, pos.y)
+    vec2 worldPos = vec2(float(pos.x) + 0.5, float(pos.y));
+
+    // Sample velocity at this position
+    float u_here = sampleU(worldPos);
+    float v_here = sampleV(worldPos);
+    vec2 vel = vec2(u_here, v_here);
+
+    // Trace back in time (velocity is in grid cells/sec)
+    vec2 prevWorldPos = worldPos - vel * dt;
+
+    // Sample v at previous position
+    float new_v = sampleV(prevWorldPos);
+
+    // Apply dissipation
+    new_v *= dissipation;
+
+    imageStore(vVelocityOut, pos, vec4(new_v, 0.0, 0.0, 0.0));
+}

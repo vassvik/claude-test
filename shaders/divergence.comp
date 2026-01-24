@@ -2,24 +2,34 @@
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
+// Proper MAC grid dimensions:
+// uVelocity: 513x512 (vertical faces)
+// vVelocity: 512x513 (horizontal faces)
+// divergence: 512x512 (cell centers)
+
 layout(r32f, binding = 0) readonly uniform image2D uVelocity;
 layout(r32f, binding = 1) readonly uniform image2D vVelocity;
 layout(r32f, binding = 2) writeonly uniform image2D divergence;
 
 void main() {
     ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
-    ivec2 size = imageSize(uVelocity);
+    ivec2 size = imageSize(divergence);
 
     if (pos.x >= size.x || pos.y >= size.y) return;
 
-    // Sample current and right/top velocities (forward difference for consistency with Laplacian)
-    float uC = imageLoad(uVelocity, pos).r;
-    float vC = imageLoad(vVelocity, pos).r;
-    float uR = (pos.x < size.x - 1) ? imageLoad(uVelocity, pos + ivec2(1, 0)).r : 0.0;
-    float vT = (pos.y < size.y - 1) ? imageLoad(vVelocity, pos + ivec2(0, 1)).r : 0.0;
+    // For cell [i,j], divergence = (u[i+1,j] - u[i,j]) + (v[i,j+1] - v[i,j])
+    // With proper MAC dimensions, all these reads are in-bounds:
+    // - u[i,j] at uVelocity[i,j] where i=0..511, valid for 513-wide texture
+    // - u[i+1,j] at uVelocity[i+1,j] where i+1=1..512, valid for 513-wide texture
+    // - v[i,j] at vVelocity[i,j] where j=0..511, valid for 513-tall texture
+    // - v[i,j+1] at vVelocity[i,j+1] where j+1=1..512, valid for 513-tall texture
 
-    // Compute divergence using forward differences: div = (u[i+1] - u[i]) + (v[j+1] - v[j])
-    float div = (uR - uC) + (vT - vC);
+    float uL = imageLoad(uVelocity, pos).r;                    // u[i,j]
+    float uR = imageLoad(uVelocity, pos + ivec2(1, 0)).r;      // u[i+1,j]
+    float vB = imageLoad(vVelocity, pos).r;                    // v[i,j]
+    float vT = imageLoad(vVelocity, pos + ivec2(0, 1)).r;      // v[i,j+1]
+
+    float div = (uR - uL) + (vT - vB);
 
     imageStore(divergence, pos, vec4(div, 0.0, 0.0, 0.0));
 }

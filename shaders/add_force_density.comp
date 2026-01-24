@@ -1,0 +1,27 @@
+#version 430 core
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// Density grid: 512x512 (cell centers)
+layout(rgba32f, binding = 0) uniform image2D density;
+
+uniform vec2 point;       // Position of force application (0-1)
+uniform float radius;     // Radius of influence (in UV space)
+uniform vec3 dyeColor;    // Color to inject
+uniform ivec2 densitySize; // 512x512
+
+void main() {
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+
+    if (pos.x >= densitySize.x || pos.y >= densitySize.y) return;
+
+    // Density lives at cell center (i+0.5, j+0.5) in world space
+    vec2 uv_density = (vec2(pos) + 0.5) / vec2(densitySize);
+
+    float dist = length(uv_density - point);
+    float influence = exp(-dist * dist / (radius * radius));
+
+    vec4 dye = imageLoad(density, pos);
+    dye.rgb += dyeColor * influence;
+    imageStore(density, pos, dye);
+}

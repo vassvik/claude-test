@@ -2,7 +2,7 @@
 
 layout(local_size_x = 16, local_size_y = 16) in;
 
-layout(r32f, binding = 0) uniform image2D pressure;
+layout(r32f, binding = 0) coherent uniform image2D pressure;
 layout(r32f, binding = 1) readonly uniform image2D divergence;
 
 uniform int redPass;  // 1 for red cells, 0 for black cells

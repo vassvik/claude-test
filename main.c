@@ -18,21 +18,31 @@ __declspec(dllexport) unsigned long AmdPowerXpressRequestHighPerformance = 1;
 #define WINDOW_WIDTH 1536
 #define WINDOW_HEIGHT 1536
 
+// MAC grid staggered dimensions
+#define U_WIDTH  (SIM_WIDTH + 1)   // 513 - vertical faces (one extra column)
+#define U_HEIGHT SIM_HEIGHT        // 512
+#define V_WIDTH  SIM_WIDTH         // 512
+#define V_HEIGHT (SIM_HEIGHT + 1)  // 513 - horizontal faces (one extra row)
+
 // Solver parameters
 int pressureIterations = 128;
 float pressureOmega = 1.8f;
 
 typedef struct {
-    unsigned int histogram[32 * 32];
+    unsigned int histogram[32 * 36];  // [postBin * 36 + preBin], pre-bins 0-35, post-bins 0-31
 } DivergenceStats2D;
 
 // Shader programs
-GLuint advectProgram;
+GLuint advectUProgram;           // Advect u-velocity (513x512)
+GLuint advectVProgram;           // Advect v-velocity (512x513)
 GLuint advectDensityProgram;
 GLuint divergenceProgram;
 GLuint pressureProgram;
-GLuint gradientSubtractProgram;
-GLuint addForceProgram;
+GLuint gradientSubtractUProgram; // Gradient subtraction for u (513x512)
+GLuint gradientSubtractVProgram; // Gradient subtraction for v (512x513)
+GLuint addForceUProgram;         // Force addition for u (513x512)
+GLuint addForceVProgram;         // Force addition for v (512x513)
+GLuint addForceDensityProgram;   // Force addition for density (512x512)
 GLuint renderProgram;
 GLuint divergenceStatsProgram;
 GLuint textProgram;
@@ -64,9 +74,11 @@ int currentPressure = 0;
 int currentDensity = 0;
 
 // Clear texture data buffers (allocated once)
-float* clearDataR = NULL;
-float* clearDataRG = NULL;
-float* clearDataRGBA = NULL;
+float* clearDataR = NULL;       // For 512x512 textures
+float* clearDataRG = NULL;      // For 512x512 textures
+float* clearDataRGBA = NULL;    // For 512x512 textures
+float* clearDataU = NULL;       // For 513x512 u-velocity texture
+float* clearDataV = NULL;       // For 512x513 v-velocity texture
 
 // Mouse state
 double lastMouseX = 0, lastMouseY = 0;
@@ -199,6 +211,9 @@ void initClearData(void) {
     clearDataR = (float*)calloc(SIM_WIDTH * SIM_HEIGHT, sizeof(float));
     clearDataRG = (float*)calloc(SIM_WIDTH * SIM_HEIGHT * 2, sizeof(float));
     clearDataRGBA = (float*)calloc(SIM_WIDTH * SIM_HEIGHT * 4, sizeof(float));
+    // Separate buffers for staggered MAC grid dimensions
+    clearDataU = (float*)calloc(U_WIDTH * U_HEIGHT, sizeof(float));  // 513x512
+    clearDataV = (float*)calloc(V_WIDTH * V_HEIGHT, sizeof(float));  // 512x513
 }
 
 void clearTextureR(GLuint tex) {
@@ -216,27 +231,42 @@ void clearTextureRGBA(GLuint tex) {
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, SIM_WIDTH, SIM_HEIGHT, GL_RGBA, GL_FLOAT, clearDataRGBA);
 }
 
+void clearTextureU(GLuint tex) {
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, U_WIDTH, U_HEIGHT, GL_RED, GL_FLOAT, clearDataU);
+}
+
+void clearTextureV(GLuint tex) {
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, V_WIDTH, V_HEIGHT, GL_RED, GL_FLOAT, clearDataV);
+}
+
 void createTextures(void) {
-    // U-velocity textures (R32F for horizontal velocity component)
+    // Border color for CLAMP_TO_BORDER (0 for open boundaries)
+    float borderColor[] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+    // U-velocity textures (R32F) - 513x512 for vertical faces
     glGenTextures(2, uVelocityTex);
     for (int i = 0; i < 2; i++) {
         glBindTexture(GL_TEXTURE_2D, uVelocityTex[i]);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, SIM_WIDTH, SIM_HEIGHT, 0, GL_RED, GL_FLOAT, NULL);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, U_WIDTH, U_HEIGHT, 0, GL_RED, GL_FLOAT, NULL);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+        glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
     }
 
-    // V-velocity textures (R32F for vertical velocity component)
+    // V-velocity textures (R32F) - 512x513 for horizontal faces
     glGenTextures(2, vVelocityTex);
     for (int i = 0; i < 2; i++) {
         glBindTexture(GL_TEXTURE_2D, vVelocityTex[i]);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, SIM_WIDTH, SIM_HEIGHT, 0, GL_RED, GL_FLOAT, NULL);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, V_WIDTH, V_HEIGHT, 0, GL_RED, GL_FLOAT, NULL);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+        glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
     }
 
     // Pressure textures (R32F)
@@ -268,15 +298,16 @@ void createTextures(void) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-    // Density textures (R32F for scalar density/dye)
+    // Density textures (RGBA32F for colored dye) - use CLAMP_TO_BORDER for open boundaries
     glGenTextures(2, densityTex);
     for (int i = 0; i < 2; i++) {
         glBindTexture(GL_TEXTURE_2D, densityTex[i]);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, SIM_WIDTH, SIM_HEIGHT, 0, GL_RGBA, GL_FLOAT, NULL);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+        glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
     }
 }
 
@@ -301,13 +332,13 @@ void getTopBins(int* preBins, int* preCounts, int* postBins, int* postCounts) {
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, statsBuffer);
     glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(DivergenceStats2D), &stats);
 
-    // Sum pre-divergence bins (columns)
-    unsigned int preSums[32] = {0};
+    // Sum pre-divergence bins (columns) - 40 pre-bins
+    unsigned int preSums[36] = {0};
     unsigned int postSums[32] = {0};
 
     for (int post = 0; post < 32; post++) {
-        for (int pre = 0; pre < 32; pre++) {
-            unsigned int count = stats.histogram[post * 32 + pre];
+        for (int pre = 0; pre < 36; pre++) {
+            unsigned int count = stats.histogram[post * 36 + pre];
             preSums[pre] += count;
             postSums[post] += count;
         }
@@ -321,7 +352,8 @@ void getTopBins(int* preBins, int* preCounts, int* postBins, int* postCounts) {
         postCounts[i] = 0;
     }
 
-    for (int b = 31; b >= 0; b--) {
+    // Pre-bins go up to 39 now
+    for (int b = 35; b >= 0; b--) {
         if (preSums[b] > 0) {
             for (int i = 0; i < 3; i++) {
                 if (preBins[i] == -1) {
@@ -331,6 +363,10 @@ void getTopBins(int* preBins, int* preCounts, int* postBins, int* postCounts) {
                 }
             }
         }
+    }
+
+    // Post-bins still go to 31
+    for (int b = 31; b >= 0; b--) {
         if (postSums[b] > 0) {
             for (int i = 0; i < 3; i++) {
                 if (postBins[i] == -1) {
@@ -348,12 +384,12 @@ void debugPrintMarginals(void) {
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, statsBuffer);
     glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(DivergenceStats2D), &stats);
 
-    unsigned int preSums[32] = {0};
+    unsigned int preSums[36] = {0};
     unsigned int postSums[32] = {0};
 
     for (int post = 0; post < 32; post++) {
-        for (int pre = 0; pre < 32; pre++) {
-            unsigned int count = stats.histogram[post * 32 + pre];
+        for (int pre = 0; pre < 36; pre++) {
+            unsigned int count = stats.histogram[post * 36 + pre];
             preSums[pre] += count;
             postSums[post] += count;
         }
@@ -362,9 +398,11 @@ void debugPrintMarginals(void) {
     printf("\n=== Marginal Sums ===\n");
     printf("Bin  | Pre-count | Post-count\n");
     printf("-----+-----------+-----------\n");
-    for (int b = 31; b >= 0; b--) {
-        if (preSums[b] > 0 || postSums[b] > 0) {
-            printf("%4d | %9u | %10u\n", b - 24, preSums[b], postSums[b]);
+    // Print pre-bins (0-39) and post-bins (0-31), showing all with data
+    for (int b = 35; b >= 0; b--) {
+        unsigned int postCount = (b < 32) ? postSums[b] : 0;
+        if (preSums[b] > 0 || postCount > 0) {
+            printf("%4d | %9u | %10u\n", b - 24, preSums[b], postCount);
         }
     }
 }
@@ -374,11 +412,11 @@ void printStats2DTable(void) {
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, statsBuffer);
     glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(DivergenceStats2D), &stats);
 
-    // Find active column range (pre bins with any data)
-    int minCol = 31, maxCol = 0;
-    for (int pre = 0; pre < 32; pre++) {
+    // Find active column range (pre bins with any data) - now 40 pre-bins
+    int minCol = 35, maxCol = 0;
+    for (int pre = 0; pre < 36; pre++) {
         for (int post = 0; post < 32; post++) {
-            if (stats.histogram[post * 32 + pre] > 0) {
+            if (stats.histogram[post * 36 + pre] > 0) {
                 if (pre < minCol) minCol = pre;
                 if (pre > maxCol) maxCol = pre;
             }
@@ -398,13 +436,13 @@ void printStats2DTable(void) {
     for (int post = 0; post < 32; post++) {
         int hasData = 0;
         for (int pre = minCol; pre <= maxCol; pre++) {
-            if (stats.histogram[post * 32 + pre] > 0) hasData = 1;
+            if (stats.histogram[post * 36 + pre] > 0) hasData = 1;
         }
         if (!hasData) continue;
 
         printf("%4d   ", post - 24);
         for (int pre = minCol; pre <= maxCol; pre++) {
-            unsigned int count = stats.histogram[post * 32 + pre];
+            unsigned int count = stats.histogram[post * 36 + pre];
             if (count == 0) printf("    .");
             else if (count < 10000) printf(" %4u", count);
             else printf(" %4uk", count / 1000);
@@ -628,8 +666,13 @@ void createQuad(void) {
 }
 
 void simulate(float dt) {
-    int groupsX = (SIM_WIDTH + 15) / 16;
-    int groupsY = (SIM_HEIGHT + 15) / 16;
+    // Dispatch sizes for different grid dimensions
+    int groupsX = (SIM_WIDTH + 15) / 16;       // 32 for 512
+    int groupsY = (SIM_HEIGHT + 15) / 16;      // 32 for 512
+    int uGroupsX = (U_WIDTH + 15) / 16;        // 33 for 513
+    int uGroupsY = (U_HEIGHT + 15) / 16;       // 32 for 512
+    int vGroupsX = (V_WIDTH + 15) / 16;        // 32 for 512
+    int vGroupsY = (V_HEIGHT + 15) / 16;       // 33 for 513
 
     if (debugTestMode) {
         // === DEBUG TEST MODE ===
@@ -641,9 +684,9 @@ void simulate(float dt) {
 
         glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0, -1, "Debug Test Mode");
 
-        // 1. Clear velocity to zero
-        clearTextureR(uVelocityTex[currentVel]);
-        clearTextureR(vVelocityTex[currentVel]);
+        // 1. Clear velocity to zero (using proper MAC grid sizes)
+        clearTextureU(uVelocityTex[currentVel]);
+        clearTextureV(vVelocityTex[currentVel]);
 
         // 2. Set a 4x4 impulse at center
         int cx = SIM_WIDTH / 2 - 2;
@@ -689,16 +732,29 @@ void simulate(float dt) {
         }
         glPopDebugGroup();
 
-        // 5. Gradient subtraction (projection)
+        // 5. Gradient subtraction (projection) - split into u and v passes
         glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0, -1, "Gradient Subtract");
-        glUseProgram(gradientSubtractProgram);
+
+        // Gradient subtract for u (513x512)
+        glUseProgram(gradientSubtractUProgram);
+        glUniform2i(glGetUniformLocation(gradientSubtractUProgram, "uSize"), U_WIDTH, U_HEIGHT);
+        glUniform2i(glGetUniformLocation(gradientSubtractUProgram, "pressSize"), SIM_WIDTH, SIM_HEIGHT);
         glBindImageTexture(0, pressureTex[currentPressure], 0, GL_FALSE, 0, GL_READ_ONLY, GL_R32F);
         glBindImageTexture(1, uVelocityTex[currentVel], 0, GL_FALSE, 0, GL_READ_ONLY, GL_R32F);
-        glBindImageTexture(2, vVelocityTex[currentVel], 0, GL_FALSE, 0, GL_READ_ONLY, GL_R32F);
-        glBindImageTexture(3, uVelocityTex[1 - currentVel], 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
-        glBindImageTexture(4, vVelocityTex[1 - currentVel], 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
-        glDispatchCompute(groupsX, groupsY, 1);
+        glBindImageTexture(2, uVelocityTex[1 - currentVel], 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
+        glDispatchCompute(uGroupsX, uGroupsY, 1);
         glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+
+        // Gradient subtract for v (512x513)
+        glUseProgram(gradientSubtractVProgram);
+        glUniform2i(glGetUniformLocation(gradientSubtractVProgram, "vSize"), V_WIDTH, V_HEIGHT);
+        glUniform2i(glGetUniformLocation(gradientSubtractVProgram, "pressSize"), SIM_WIDTH, SIM_HEIGHT);
+        glBindImageTexture(0, pressureTex[currentPressure], 0, GL_FALSE, 0, GL_READ_ONLY, GL_R32F);
+        glBindImageTexture(1, vVelocityTex[currentVel], 0, GL_FALSE, 0, GL_READ_ONLY, GL_R32F);
+        glBindImageTexture(2, vVelocityTex[1 - currentVel], 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
+        glDispatchCompute(vGroupsX, vGroupsY, 1);
+        glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+
         currentVel = 1 - currentVel;
         glPopDebugGroup();
 
@@ -749,22 +805,41 @@ void simulate(float dt) {
     currentDensity = 1 - currentDensity;
     glPopDebugGroup();
 
-    // 2. Advect velocity with itself
+    // 2. Advect velocity with itself - split into u and v passes
     glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0, -1, "Advect Velocity");
-    glUseProgram(advectProgram);
-    glUniform1f(glGetUniformLocation(advectProgram, "dt"), dt);
-    glUniform2f(glGetUniformLocation(advectProgram, "texelSize"), 1.0f / SIM_WIDTH, 1.0f / SIM_HEIGHT);
-    glUniform1f(glGetUniformLocation(advectProgram, "dissipation"), 1.0f);
-    glUniform1i(glGetUniformLocation(advectProgram, "uVelocitySampler"), 0);
-    glUniform1i(glGetUniformLocation(advectProgram, "vVelocitySampler"), 1);
+
+    // Advect u (513x512)
+    glUseProgram(advectUProgram);
+    glUniform1f(glGetUniformLocation(advectUProgram, "dt"), dt);
+    glUniform1f(glGetUniformLocation(advectUProgram, "dissipation"), 1.0f);
+    glUniform2i(glGetUniformLocation(advectUProgram, "uSize"), U_WIDTH, U_HEIGHT);
+    glUniform2i(glGetUniformLocation(advectUProgram, "vSize"), V_WIDTH, V_HEIGHT);
+    glUniform1i(glGetUniformLocation(advectUProgram, "uVelocitySampler"), 0);
+    glUniform1i(glGetUniformLocation(advectUProgram, "vVelocitySampler"), 1);
     glBindImageTexture(0, uVelocityTex[1 - currentVel], 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
-    glBindImageTexture(1, vVelocityTex[1 - currentVel], 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, uVelocityTex[currentVel]);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_2D, vVelocityTex[currentVel]);
-    glDispatchCompute(groupsX, groupsY, 1);
+    glDispatchCompute(uGroupsX, uGroupsY, 1);
     glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT);
+
+    // Advect v (512x513)
+    glUseProgram(advectVProgram);
+    glUniform1f(glGetUniformLocation(advectVProgram, "dt"), dt);
+    glUniform1f(glGetUniformLocation(advectVProgram, "dissipation"), 1.0f);
+    glUniform2i(glGetUniformLocation(advectVProgram, "uSize"), U_WIDTH, U_HEIGHT);
+    glUniform2i(glGetUniformLocation(advectVProgram, "vSize"), V_WIDTH, V_HEIGHT);
+    glUniform1i(glGetUniformLocation(advectVProgram, "uVelocitySampler"), 0);
+    glUniform1i(glGetUniformLocation(advectVProgram, "vVelocitySampler"), 1);
+    glBindImageTexture(0, vVelocityTex[1 - currentVel], 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, uVelocityTex[currentVel]);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, vVelocityTex[currentVel]);
+    glDispatchCompute(vGroupsX, vGroupsY, 1);
+    glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT);
+
     currentVel = 1 - currentVel;
     glPopDebugGroup();
 
@@ -804,16 +879,29 @@ void simulate(float dt) {
     }
     glPopDebugGroup();
 
-    // 5. Gradient subtraction (projection) - final step
+    // 5. Gradient subtraction (projection) - split into u and v passes
     glPushDebugGroup(GL_DEBUG_SOURCE_APPLICATION, 0, -1, "Gradient Subtract");
-    glUseProgram(gradientSubtractProgram);
+
+    // Gradient subtract for u (513x512)
+    glUseProgram(gradientSubtractUProgram);
+    glUniform2i(glGetUniformLocation(gradientSubtractUProgram, "uSize"), U_WIDTH, U_HEIGHT);
+    glUniform2i(glGetUniformLocation(gradientSubtractUProgram, "pressSize"), SIM_WIDTH, SIM_HEIGHT);
     glBindImageTexture(0, pressureTex[currentPressure], 0, GL_FALSE, 0, GL_READ_ONLY, GL_R32F);
     glBindImageTexture(1, uVelocityTex[currentVel], 0, GL_FALSE, 0, GL_READ_ONLY, GL_R32F);
-    glBindImageTexture(2, vVelocityTex[currentVel], 0, GL_FALSE, 0, GL_READ_ONLY, GL_R32F);
-    glBindImageTexture(3, uVelocityTex[1 - currentVel], 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
-    glBindImageTexture(4, vVelocityTex[1 - currentVel], 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
-    glDispatchCompute(groupsX, groupsY, 1);
+    glBindImageTexture(2, uVelocityTex[1 - currentVel], 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
+    glDispatchCompute(uGroupsX, uGroupsY, 1);
     glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+
+    // Gradient subtract for v (512x513)
+    glUseProgram(gradientSubtractVProgram);
+    glUniform2i(glGetUniformLocation(gradientSubtractVProgram, "vSize"), V_WIDTH, V_HEIGHT);
+    glUniform2i(glGetUniformLocation(gradientSubtractVProgram, "pressSize"), SIM_WIDTH, SIM_HEIGHT);
+    glBindImageTexture(0, pressureTex[currentPressure], 0, GL_FALSE, 0, GL_READ_ONLY, GL_R32F);
+    glBindImageTexture(1, vVelocityTex[currentVel], 0, GL_FALSE, 0, GL_READ_ONLY, GL_R32F);
+    glBindImageTexture(2, vVelocityTex[1 - currentVel], 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_R32F);
+    glDispatchCompute(vGroupsX, vGroupsY, 1);
+    glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+
     currentVel = 1 - currentVel;
     glPopDebugGroup();
 
@@ -840,12 +928,17 @@ void addForce(float x, float y, float dx, float dy) {
     // Ignore mouse input in debug test mode
     if (debugTestMode) return;
 
+    // Dispatch sizes for different grid dimensions
     int groupsX = (SIM_WIDTH + 15) / 16;
     int groupsY = (SIM_HEIGHT + 15) / 16;
+    int uGroupsX = (U_WIDTH + 15) / 16;
+    int uGroupsY = (U_HEIGHT + 15) / 16;
+    int vGroupsX = (V_WIDTH + 15) / 16;
+    int vGroupsY = (V_HEIGHT + 15) / 16;
 
     // Convert screen-space delta to grid-space velocity (grid cells per second)
     // dx/dy are in normalized screen coords per frame, scale to reasonable velocity
-    float forceScale = 300.0f * SIM_WIDTH;  // Scale factor for force
+    float forceScale = 100.0f * SIM_WIDTH;  // Scale factor for force (reduced from 300)
     float fx = dx * forceScale;
     float fy = dy * forceScale;
 
@@ -855,15 +948,33 @@ void addForce(float x, float y, float dx, float dy) {
     float g = 0.5f + 0.5f * cosf(angle + 2.094f);  // 120 degrees
     float b = 0.5f + 0.5f * cosf(angle + 4.189f);  // 240 degrees
 
-    glUseProgram(addForceProgram);
-    glUniform2f(glGetUniformLocation(addForceProgram, "point"), x, y);
-    glUniform2f(glGetUniformLocation(addForceProgram, "force"), fx, fy);
-    glUniform1f(glGetUniformLocation(addForceProgram, "radius"), 0.02f);
-    glUniform3f(glGetUniformLocation(addForceProgram, "dyeColor"), r, g, b);
-
+    // Add force to u-velocity (513x512)
+    glUseProgram(addForceUProgram);
+    glUniform2f(glGetUniformLocation(addForceUProgram, "point"), x, y);
+    glUniform1f(glGetUniformLocation(addForceUProgram, "forceX"), fx);
+    glUniform1f(glGetUniformLocation(addForceUProgram, "radius"), 0.02f);
+    glUniform2i(glGetUniformLocation(addForceUProgram, "uSize"), U_WIDTH, U_HEIGHT);
     glBindImageTexture(0, uVelocityTex[currentVel], 0, GL_FALSE, 0, GL_READ_WRITE, GL_R32F);
-    glBindImageTexture(1, vVelocityTex[currentVel], 0, GL_FALSE, 0, GL_READ_WRITE, GL_R32F);
-    glBindImageTexture(2, densityTex[currentDensity], 0, GL_FALSE, 0, GL_READ_WRITE, GL_RGBA32F);
+    glDispatchCompute(uGroupsX, uGroupsY, 1);
+    glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+
+    // Add force to v-velocity (512x513)
+    glUseProgram(addForceVProgram);
+    glUniform2f(glGetUniformLocation(addForceVProgram, "point"), x, y);
+    glUniform1f(glGetUniformLocation(addForceVProgram, "forceY"), fy);
+    glUniform1f(glGetUniformLocation(addForceVProgram, "radius"), 0.02f);
+    glUniform2i(glGetUniformLocation(addForceVProgram, "vSize"), V_WIDTH, V_HEIGHT);
+    glBindImageTexture(0, vVelocityTex[currentVel], 0, GL_FALSE, 0, GL_READ_WRITE, GL_R32F);
+    glDispatchCompute(vGroupsX, vGroupsY, 1);
+    glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+
+    // Add dye to density (512x512)
+    glUseProgram(addForceDensityProgram);
+    glUniform2f(glGetUniformLocation(addForceDensityProgram, "point"), x, y);
+    glUniform1f(glGetUniformLocation(addForceDensityProgram, "radius"), 0.02f);
+    glUniform3f(glGetUniformLocation(addForceDensityProgram, "dyeColor"), r, g, b);
+    glUniform2i(glGetUniformLocation(addForceDensityProgram, "densitySize"), SIM_WIDTH, SIM_HEIGHT);
+    glBindImageTexture(0, densityTex[currentDensity], 0, GL_FALSE, 0, GL_READ_WRITE, GL_RGBA32F);
     glDispatchCompute(groupsX, groupsY, 1);
     glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
 }
@@ -913,10 +1024,10 @@ void render(void) {
 
 void setupImpulseTest(void) {
     // Clear all textures first
-    clearTextureR(uVelocityTex[0]);
-    clearTextureR(uVelocityTex[1]);
-    clearTextureR(vVelocityTex[0]);
-    clearTextureR(vVelocityTex[1]);
+    clearTextureU(uVelocityTex[0]);
+    clearTextureU(uVelocityTex[1]);
+    clearTextureV(vVelocityTex[0]);
+    clearTextureV(vVelocityTex[1]);
     clearTextureRGBA(densityTex[0]);
     clearTextureRGBA(densityTex[1]);
     clearTextureR(pressureTex[0]);
@@ -949,8 +1060,8 @@ int evaluateConvergence(int* worstBinCount) {
     int worstCount = 0;
     for (int post = 31; post >= 0; post--) {
         unsigned int total = 0;
-        for (int pre = 0; pre < 32; pre++) {
-            total += stats.histogram[post * 32 + pre];
+        for (int pre = 0; pre < 36; pre++) {
+            total += stats.histogram[post * 36 + pre];
         }
         if (total > 0) {
             worstBin = post;
@@ -1037,10 +1148,10 @@ void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods
     }
     if (key == GLFW_KEY_R && action == GLFW_PRESS) {
         // Reset simulation
-        clearTextureR(uVelocityTex[0]);
-        clearTextureR(uVelocityTex[1]);
-        clearTextureR(vVelocityTex[0]);
-        clearTextureR(vVelocityTex[1]);
+        clearTextureU(uVelocityTex[0]);
+        clearTextureU(uVelocityTex[1]);
+        clearTextureV(vVelocityTex[0]);
+        clearTextureV(vVelocityTex[1]);
         clearTextureRGBA(densityTex[0]);
         clearTextureRGBA(densityTex[1]);
         clearTextureR(pressureTex[0]);
@@ -1105,19 +1216,25 @@ int main(void) {
     glfwSetMouseButtonCallback(window, mouseButtonCallback);
     glfwSetKeyCallback(window, keyCallback);
 
-    // Load shaders
-    advectProgram = createComputeShader("shaders/advect.comp");
+    // Load shaders - using split shaders for MAC grid
+    advectUProgram = createComputeShader("shaders/advect_u.comp");
+    advectVProgram = createComputeShader("shaders/advect_v.comp");
     advectDensityProgram = createComputeShader("shaders/advect_density.comp");
     divergenceProgram = createComputeShader("shaders/divergence.comp");
     pressureProgram = createComputeShader("shaders/pressure.comp");
-    gradientSubtractProgram = createComputeShader("shaders/gradient_subtract.comp");
-    addForceProgram = createComputeShader("shaders/add_force.comp");
+    gradientSubtractUProgram = createComputeShader("shaders/gradient_subtract_u.comp");
+    gradientSubtractVProgram = createComputeShader("shaders/gradient_subtract_v.comp");
+    addForceUProgram = createComputeShader("shaders/add_force_u.comp");
+    addForceVProgram = createComputeShader("shaders/add_force_v.comp");
+    addForceDensityProgram = createComputeShader("shaders/add_force_density.comp");
     divergenceStatsProgram = createComputeShader("shaders/divergence_stats.comp");
     renderProgram = createRenderProgram("shaders/quad.vert", "shaders/render.frag");
     textProgram = createRenderProgram("shaders/text.vert", "shaders/text.frag");
 
-    if (!advectProgram || !advectDensityProgram || !divergenceProgram || !pressureProgram ||
-        !gradientSubtractProgram || !addForceProgram || !divergenceStatsProgram || !renderProgram || !textProgram) {
+    if (!advectUProgram || !advectVProgram || !advectDensityProgram || !divergenceProgram ||
+        !pressureProgram || !gradientSubtractUProgram || !gradientSubtractVProgram ||
+        !addForceUProgram || !addForceVProgram || !addForceDensityProgram ||
+        !divergenceStatsProgram || !renderProgram || !textProgram) {
         fprintf(stderr, "Failed to load shaders\n");
         glfwTerminate();
         return -1;
@@ -1136,10 +1253,10 @@ int main(void) {
     glBufferData(GL_SHADER_STORAGE_BUFFER, sizeof(DivergenceStats2D), NULL, GL_DYNAMIC_READ);
 
     // Initialize all simulation textures to zero
-    clearTextureR(uVelocityTex[0]);
-    clearTextureR(uVelocityTex[1]);
-    clearTextureR(vVelocityTex[0]);
-    clearTextureR(vVelocityTex[1]);
+    clearTextureU(uVelocityTex[0]);
+    clearTextureU(uVelocityTex[1]);
+    clearTextureV(vVelocityTex[0]);
+    clearTextureV(vVelocityTex[1]);
     clearTextureRGBA(densityTex[0]);
     clearTextureRGBA(densityTex[1]);
     clearTextureR(pressureTex[0]);
@@ -1227,12 +1344,16 @@ int main(void) {
     }
 
     // Cleanup
-    glDeleteProgram(advectProgram);
+    glDeleteProgram(advectUProgram);
+    glDeleteProgram(advectVProgram);
     glDeleteProgram(advectDensityProgram);
     glDeleteProgram(divergenceProgram);
     glDeleteProgram(pressureProgram);
-    glDeleteProgram(gradientSubtractProgram);
-    glDeleteProgram(addForceProgram);
+    glDeleteProgram(gradientSubtractUProgram);
+    glDeleteProgram(gradientSubtractVProgram);
+    glDeleteProgram(addForceUProgram);
+    glDeleteProgram(addForceVProgram);
+    glDeleteProgram(addForceDensityProgram);
     glDeleteProgram(divergenceStatsProgram);
     glDeleteProgram(renderProgram);
     glDeleteProgram(textProgram);
@@ -1256,6 +1377,8 @@ int main(void) {
     free(clearDataR);
     free(clearDataRG);
     free(clearDataRGBA);
+    free(clearDataU);
+    free(clearDataV);
 
     glfwDestroyWindow(window);
     glfwTerminate();
