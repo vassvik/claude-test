@@ -662,39 +662,31 @@ int main(void) {
 
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 
-    printf("=== Omega Search for Optimal SOR Convergence ===\n");
-    printf("Grid: %dx%d, Iterations: %d\n", SIM_WIDTH, SIM_HEIGHT, pressureIterations);
+    // Set solver parameters for interactive use
+    pressureIterations = 100;
+    pressureOmega = 1.9f;
 
-    // Iterative search for optimal omega
-    float omegaMin = 1.5f;
-    float omegaMax = 1.9f;
+    printf("Controls:\n");
+    printf("  Left mouse + drag: Add velocity and dye\n");
+    printf("  R: Reset simulation\n");
+    printf("  V: Toggle velocity visualization\n");
+    printf("  ESC: Quit\n");
 
-    for (int round = 0; round < 4; round++) {
-        printf("\n=== Round %d ===\n", round + 1);
-        runOmegaSearch(omegaMin, omegaMax, 20);
+    double lastTime = glfwGetTime();
 
-        // Find best omega in this range for next iteration
-        float bestOmega = omegaMin;
-        int bestWorstBin = 31;
-        int bestWorstCount = INT_MAX;
+    while (!glfwWindowShouldClose(window)) {
+        double currentTime = glfwGetTime();
+        float dt = (float)(currentTime - lastTime);
+        lastTime = currentTime;
 
-        for (int i = 0; i < 20; i++) {
-            float omega = omegaMin + (omegaMax - omegaMin) * i / 19;
-            int worstBin, worstCount;
-            testOmega(omega, &worstBin, &worstCount);
-            if (worstBin < bestWorstBin || (worstBin == bestWorstBin && worstCount < bestWorstCount)) {
-                bestOmega = omega;
-                bestWorstBin = worstBin;
-                bestWorstCount = worstCount;
-            }
-        }
+        // Clamp dt to avoid instability
+        if (dt > 0.1f) dt = 0.1f;
 
-        // Narrow the search range around the best
-        float range = (omegaMax - omegaMin) / 4.0f;
-        omegaMin = bestOmega - range;
-        omegaMax = bestOmega + range;
-        if (omegaMin < 1.0f) omegaMin = 1.0f;
-        if (omegaMax > 1.99f) omegaMax = 1.99f;
+        simulate(dt);
+        render();
+
+        glfwSwapBuffers(window);
+        glfwPollEvents();
     }
 
     // Cleanup
