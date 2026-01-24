@@ -4,6 +4,12 @@
 #include <math.h>
 #include <limits.h>
 
+// Force discrete GPU on Optimus/PowerXpress systems
+#ifdef _WIN32
+__declspec(dllexport) unsigned long NvOptimusEnablement = 1;
+__declspec(dllexport) unsigned long AmdPowerXpressRequestHighPerformance = 1;
+#endif
+
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 
