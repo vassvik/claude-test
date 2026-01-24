@@ -22,10 +22,11 @@ void main() {
     // Interpolate velocity to cell center (MAC grid)
     // u lives at left faces, so average u[i,j] and u[i+1,j] to get u at center
     // v lives at bottom faces, so average v[i,j] and v[i,j+1] to get v at center
+    // Open boundary: velocity = 0 outside domain
     float u_left = imageLoad(velocity, pos).x;
-    float u_right = (pos.x < size.x - 1) ? imageLoad(velocity, pos + ivec2(1, 0)).x : u_left;
+    float u_right = (pos.x < size.x - 1) ? imageLoad(velocity, pos + ivec2(1, 0)).x : 0.0;
     float v_bottom = imageLoad(velocity, pos).y;
-    float v_top = (pos.y < size.y - 1) ? imageLoad(velocity, pos + ivec2(0, 1)).y : v_bottom;
+    float v_top = (pos.y < size.y - 1) ? imageLoad(velocity, pos + ivec2(0, 1)).y : 0.0;
 
     vec2 vel = vec2(0.5 * (u_left + u_right), 0.5 * (v_bottom + v_top));
 
