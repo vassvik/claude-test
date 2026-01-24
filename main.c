@@ -35,6 +35,11 @@ GLuint gradientSubtractProgram;
 GLuint addForceProgram;
 GLuint renderProgram;
 GLuint divergenceStatsProgram;
+GLuint textProgram;
+
+// Text rendering
+GLuint fontTexture;
+GLuint textVAO, textVBO;
 
 // Stats buffer
 GLuint statsBuffer;
@@ -68,6 +73,7 @@ int mousePressed = 0;
 
 // Debug visualization
 int showVelocity = 0;
+int showConvergence = 0;
 
 // Function prototypes
 char* loadShaderSource(const char* filename);
@@ -269,6 +275,54 @@ void computeStats2D(GLuint preTex, GLuint postTex) {
     glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT);
 }
 
+// Get top 3 bins for pre and post divergence
+void getTopBins(int* preBins, int* preCounts, int* postBins, int* postCounts) {
+    DivergenceStats2D stats;
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, statsBuffer);
+    glGetBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, sizeof(DivergenceStats2D), &stats);
+
+    // Sum pre-divergence bins (columns)
+    unsigned int preSums[32] = {0};
+    unsigned int postSums[32] = {0};
+
+    for (int post = 0; post < 32; post++) {
+        for (int pre = 0; pre < 32; pre++) {
+            unsigned int count = stats.histogram[post * 32 + pre];
+            preSums[pre] += count;
+            postSums[post] += count;
+        }
+    }
+
+    // Find top 3 for pre (highest bin index with counts, i.e., worst divergence)
+    for (int i = 0; i < 3; i++) {
+        preBins[i] = -1;
+        preCounts[i] = 0;
+        postBins[i] = -1;
+        postCounts[i] = 0;
+    }
+
+    for (int b = 31; b >= 0; b--) {
+        if (preSums[b] > 0) {
+            for (int i = 0; i < 3; i++) {
+                if (preBins[i] == -1) {
+                    preBins[i] = b - 24;
+                    preCounts[i] = preSums[b];
+                    break;
+                }
+            }
+        }
+        if (postSums[b] > 0) {
+            for (int i = 0; i < 3; i++) {
+                if (postBins[i] == -1) {
+                    postBins[i] = b - 24;
+                    postCounts[i] = postSums[b];
+                    break;
+                }
+            }
+        }
+    }
+}
+
 void printStats2DTable(void) {
     DivergenceStats2D stats;
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, statsBuffer);
@@ -311,6 +365,199 @@ void printStats2DTable(void) {
         }
         printf("\n");
     }
+}
+
+// Simple 8x8 bitmap font (ASCII 32-127, 16 chars per row, 6 rows)
+// Each character is 8x8 pixels, stored as 8 bytes (1 bit per pixel)
+static const unsigned char font8x8[96][8] = {
+    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // 32: space
+    {0x18,0x18,0x18,0x18,0x18,0x00,0x18,0x00}, // 33: !
+    {0x6C,0x6C,0x24,0x00,0x00,0x00,0x00,0x00}, // 34: "
+    {0x6C,0xFE,0x6C,0x6C,0xFE,0x6C,0x00,0x00}, // 35: #
+    {0x18,0x7E,0xC0,0x7C,0x06,0xFC,0x18,0x00}, // 36: $
+    {0xC6,0xCC,0x18,0x30,0x66,0xC6,0x00,0x00}, // 37: %
+    {0x38,0x6C,0x38,0x76,0xDC,0xCC,0x76,0x00}, // 38: &
+    {0x18,0x18,0x30,0x00,0x00,0x00,0x00,0x00}, // 39: '
+    {0x0C,0x18,0x30,0x30,0x30,0x18,0x0C,0x00}, // 40: (
+    {0x30,0x18,0x0C,0x0C,0x0C,0x18,0x30,0x00}, // 41: )
+    {0x00,0x66,0x3C,0xFF,0x3C,0x66,0x00,0x00}, // 42: *
+    {0x00,0x18,0x18,0x7E,0x18,0x18,0x00,0x00}, // 43: +
+    {0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x30}, // 44: ,
+    {0x00,0x00,0x00,0x7E,0x00,0x00,0x00,0x00}, // 45: -
+    {0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x00}, // 46: .
+    {0x06,0x0C,0x18,0x30,0x60,0xC0,0x00,0x00}, // 47: /
+    {0x7C,0xC6,0xCE,0xD6,0xE6,0xC6,0x7C,0x00}, // 48: 0
+    {0x18,0x38,0x18,0x18,0x18,0x18,0x7E,0x00}, // 49: 1
+    {0x7C,0xC6,0x0C,0x18,0x30,0x60,0xFE,0x00}, // 50: 2
+    {0x7C,0xC6,0x06,0x3C,0x06,0xC6,0x7C,0x00}, // 51: 3
+    {0x0C,0x1C,0x3C,0x6C,0xFE,0x0C,0x0C,0x00}, // 52: 4
+    {0xFE,0xC0,0xFC,0x06,0x06,0xC6,0x7C,0x00}, // 53: 5
+    {0x7C,0xC0,0xFC,0xC6,0xC6,0xC6,0x7C,0x00}, // 54: 6
+    {0xFE,0x06,0x0C,0x18,0x30,0x30,0x30,0x00}, // 55: 7
+    {0x7C,0xC6,0xC6,0x7C,0xC6,0xC6,0x7C,0x00}, // 56: 8
+    {0x7C,0xC6,0xC6,0x7E,0x06,0x06,0x7C,0x00}, // 57: 9
+    {0x00,0x18,0x18,0x00,0x00,0x18,0x18,0x00}, // 58: :
+    {0x00,0x18,0x18,0x00,0x00,0x18,0x18,0x30}, // 59: ;
+    {0x0C,0x18,0x30,0x60,0x30,0x18,0x0C,0x00}, // 60: <
+    {0x00,0x00,0x7E,0x00,0x7E,0x00,0x00,0x00}, // 61: =
+    {0x30,0x18,0x0C,0x06,0x0C,0x18,0x30,0x00}, // 62: >
+    {0x7C,0xC6,0x0C,0x18,0x18,0x00,0x18,0x00}, // 63: ?
+    {0x7C,0xC6,0xDE,0xDE,0xDC,0xC0,0x7C,0x00}, // 64: @
+    {0x38,0x6C,0xC6,0xC6,0xFE,0xC6,0xC6,0x00}, // 65: A
+    {0xFC,0xC6,0xC6,0xFC,0xC6,0xC6,0xFC,0x00}, // 66: B
+    {0x7C,0xC6,0xC0,0xC0,0xC0,0xC6,0x7C,0x00}, // 67: C
+    {0xF8,0xCC,0xC6,0xC6,0xC6,0xCC,0xF8,0x00}, // 68: D
+    {0xFE,0xC0,0xC0,0xFC,0xC0,0xC0,0xFE,0x00}, // 69: E
+    {0xFE,0xC0,0xC0,0xFC,0xC0,0xC0,0xC0,0x00}, // 70: F
+    {0x7C,0xC6,0xC0,0xCE,0xC6,0xC6,0x7C,0x00}, // 71: G
+    {0xC6,0xC6,0xC6,0xFE,0xC6,0xC6,0xC6,0x00}, // 72: H
+    {0x7E,0x18,0x18,0x18,0x18,0x18,0x7E,0x00}, // 73: I
+    {0x06,0x06,0x06,0x06,0xC6,0xC6,0x7C,0x00}, // 74: J
+    {0xC6,0xCC,0xD8,0xF0,0xD8,0xCC,0xC6,0x00}, // 75: K
+    {0xC0,0xC0,0xC0,0xC0,0xC0,0xC0,0xFE,0x00}, // 76: L
+    {0xC6,0xEE,0xFE,0xD6,0xC6,0xC6,0xC6,0x00}, // 77: M
+    {0xC6,0xE6,0xF6,0xDE,0xCE,0xC6,0xC6,0x00}, // 78: N
+    {0x7C,0xC6,0xC6,0xC6,0xC6,0xC6,0x7C,0x00}, // 79: O
+    {0xFC,0xC6,0xC6,0xFC,0xC0,0xC0,0xC0,0x00}, // 80: P
+    {0x7C,0xC6,0xC6,0xC6,0xD6,0xDE,0x7C,0x06}, // 81: Q
+    {0xFC,0xC6,0xC6,0xFC,0xD8,0xCC,0xC6,0x00}, // 82: R
+    {0x7C,0xC6,0xC0,0x7C,0x06,0xC6,0x7C,0x00}, // 83: S
+    {0xFF,0x18,0x18,0x18,0x18,0x18,0x18,0x00}, // 84: T
+    {0xC6,0xC6,0xC6,0xC6,0xC6,0xC6,0x7C,0x00}, // 85: U
+    {0xC6,0xC6,0xC6,0xC6,0x6C,0x38,0x10,0x00}, // 86: V
+    {0xC6,0xC6,0xC6,0xD6,0xFE,0xEE,0xC6,0x00}, // 87: W
+    {0xC6,0xC6,0x6C,0x38,0x6C,0xC6,0xC6,0x00}, // 88: X
+    {0xC3,0xC3,0x66,0x3C,0x18,0x18,0x18,0x00}, // 89: Y
+    {0xFE,0x06,0x0C,0x18,0x30,0x60,0xFE,0x00}, // 90: Z
+    {0x3C,0x30,0x30,0x30,0x30,0x30,0x3C,0x00}, // 91: [
+    {0xC0,0x60,0x30,0x18,0x0C,0x06,0x00,0x00}, // 92: backslash
+    {0x3C,0x0C,0x0C,0x0C,0x0C,0x0C,0x3C,0x00}, // 93: ]
+    {0x10,0x38,0x6C,0xC6,0x00,0x00,0x00,0x00}, // 94: ^
+    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xFF}, // 95: _
+    {0x30,0x18,0x0C,0x00,0x00,0x00,0x00,0x00}, // 96: `
+    {0x00,0x00,0x7C,0x06,0x7E,0xC6,0x7E,0x00}, // 97: a
+    {0xC0,0xC0,0xFC,0xC6,0xC6,0xC6,0xFC,0x00}, // 98: b
+    {0x00,0x00,0x7C,0xC6,0xC0,0xC6,0x7C,0x00}, // 99: c
+    {0x06,0x06,0x7E,0xC6,0xC6,0xC6,0x7E,0x00}, // 100: d
+    {0x00,0x00,0x7C,0xC6,0xFE,0xC0,0x7C,0x00}, // 101: e
+    {0x1C,0x30,0x7C,0x30,0x30,0x30,0x30,0x00}, // 102: f
+    {0x00,0x00,0x7E,0xC6,0xC6,0x7E,0x06,0x7C}, // 103: g
+    {0xC0,0xC0,0xFC,0xC6,0xC6,0xC6,0xC6,0x00}, // 104: h
+    {0x18,0x00,0x38,0x18,0x18,0x18,0x3C,0x00}, // 105: i
+    {0x06,0x00,0x0E,0x06,0x06,0x06,0xC6,0x7C}, // 106: j
+    {0xC0,0xC0,0xCC,0xD8,0xF0,0xD8,0xCC,0x00}, // 107: k
+    {0x38,0x18,0x18,0x18,0x18,0x18,0x3C,0x00}, // 108: l
+    {0x00,0x00,0xEC,0xFE,0xD6,0xC6,0xC6,0x00}, // 109: m
+    {0x00,0x00,0xFC,0xC6,0xC6,0xC6,0xC6,0x00}, // 110: n
+    {0x00,0x00,0x7C,0xC6,0xC6,0xC6,0x7C,0x00}, // 111: o
+    {0x00,0x00,0xFC,0xC6,0xC6,0xFC,0xC0,0xC0}, // 112: p
+    {0x00,0x00,0x7E,0xC6,0xC6,0x7E,0x06,0x06}, // 113: q
+    {0x00,0x00,0xDC,0xE6,0xC0,0xC0,0xC0,0x00}, // 114: r
+    {0x00,0x00,0x7E,0xC0,0x7C,0x06,0xFC,0x00}, // 115: s
+    {0x30,0x30,0x7C,0x30,0x30,0x30,0x1C,0x00}, // 116: t
+    {0x00,0x00,0xC6,0xC6,0xC6,0xC6,0x7E,0x00}, // 117: u
+    {0x00,0x00,0xC6,0xC6,0xC6,0x6C,0x38,0x00}, // 118: v
+    {0x00,0x00,0xC6,0xC6,0xD6,0xFE,0x6C,0x00}, // 119: w
+    {0x00,0x00,0xC6,0x6C,0x38,0x6C,0xC6,0x00}, // 120: x
+    {0x00,0x00,0xC6,0xC6,0xC6,0x7E,0x06,0x7C}, // 121: y
+    {0x00,0x00,0xFE,0x0C,0x38,0x60,0xFE,0x00}, // 122: z
+    {0x0E,0x18,0x18,0x70,0x18,0x18,0x0E,0x00}, // 123: {
+    {0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x00}, // 124: |
+    {0x70,0x18,0x18,0x0E,0x18,0x18,0x70,0x00}, // 125: }
+    {0x76,0xDC,0x00,0x00,0x00,0x00,0x00,0x00}, // 126: ~
+    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // 127: DEL
+};
+
+void createFontTexture(void) {
+    // Create 128x64 texture (16 chars x 8 rows, each char 8x8)
+    unsigned char* pixels = (unsigned char*)calloc(128 * 64, 1);
+
+    for (int c = 0; c < 96; c++) {
+        int cx = (c % 16) * 8;
+        int cy = (c / 16) * 8;
+        for (int y = 0; y < 8; y++) {
+            unsigned char row = font8x8[c][y];
+            for (int x = 0; x < 8; x++) {
+                if (row & (0x80 >> x)) {
+                    pixels[(cy + y) * 128 + cx + x] = 255;
+                }
+            }
+        }
+    }
+
+    glGenTextures(1, &fontTexture);
+    glBindTexture(GL_TEXTURE_2D, fontTexture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, 128, 64, 0, GL_RED, GL_UNSIGNED_BYTE, pixels);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    free(pixels);
+}
+
+void createTextBuffers(void) {
+    glGenVertexArrays(1, &textVAO);
+    glGenBuffers(1, &textVBO);
+    glBindVertexArray(textVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, textVBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 6 * 4 * 256, NULL, GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
+}
+
+void renderText(const char* text, float x, float y, float scale, float r, float g, float b) {
+    glUseProgram(textProgram);
+    glUniform2f(glGetUniformLocation(textProgram, "screenSize"), (float)WINDOW_WIDTH, (float)WINDOW_HEIGHT);
+    glUniform3f(glGetUniformLocation(textProgram, "textColor"), r, g, b);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, fontTexture);
+    glUniform1i(glGetUniformLocation(textProgram, "fontTex"), 0);
+
+    glBindVertexArray(textVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, textVBO);
+
+    float vertices[6 * 4 * 256];
+    int vertexCount = 0;
+    float charW = 8.0f * scale;
+    float charH = 8.0f * scale;
+
+    for (int i = 0; text[i] && i < 256; i++) {
+        char c = text[i];
+        if (c < 32 || c > 127) c = '?';
+        int idx = c - 32;
+
+        float u0 = (idx % 16) * 8.0f / 128.0f;
+        float v0 = (idx / 16) * 8.0f / 64.0f;
+        float u1 = u0 + 8.0f / 128.0f;
+        float v1 = v0 + 8.0f / 64.0f;
+
+        float x0 = x + i * charW;
+        float y0 = y;
+        float x1 = x0 + charW;
+        float y1 = y0 + charH;
+
+        float quad[24] = {
+            x0, y0, u0, v0,
+            x1, y0, u1, v0,
+            x1, y1, u1, v1,
+            x0, y0, u0, v0,
+            x1, y1, u1, v1,
+            x0, y1, u0, v1,
+        };
+        memcpy(vertices + vertexCount * 24, quad, sizeof(quad));
+        vertexCount++;
+    }
+
+    glBufferSubData(GL_ARRAY_BUFFER, 0, vertexCount * 24 * sizeof(float), vertices);
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDrawArrays(GL_TRIANGLES, 0, vertexCount * 6);
+    glDisable(GL_BLEND);
 }
 
 void createQuad(void) {
@@ -591,6 +838,10 @@ void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods
         showVelocity = !showVelocity;
         printf("Showing: %s\n", showVelocity ? "velocity" : "density");
     }
+    if (key == GLFW_KEY_C && action == GLFW_PRESS) {
+        showConvergence = !showConvergence;
+        printf("Convergence stats: %s\n", showConvergence ? "on" : "off");
+    }
 }
 
 int main(void) {
@@ -634,9 +885,10 @@ int main(void) {
     addForceProgram = createComputeShader("shaders/add_force.comp");
     divergenceStatsProgram = createComputeShader("shaders/divergence_stats.comp");
     renderProgram = createRenderProgram("shaders/quad.vert", "shaders/render.frag");
+    textProgram = createRenderProgram("shaders/text.vert", "shaders/text.frag");
 
     if (!advectProgram || !advectDensityProgram || !divergenceProgram || !pressureProgram ||
-        !gradientSubtractProgram || !addForceProgram || !divergenceStatsProgram || !renderProgram) {
+        !gradientSubtractProgram || !addForceProgram || !divergenceStatsProgram || !renderProgram || !textProgram) {
         fprintf(stderr, "Failed to load shaders\n");
         glfwTerminate();
         return -1;
@@ -646,6 +898,8 @@ int main(void) {
     initClearData();
     createTextures();
     createQuad();
+    createFontTexture();
+    createTextBuffers();
 
     // Create stats buffer
     glGenBuffers(1, &statsBuffer);
@@ -670,20 +924,63 @@ int main(void) {
     printf("  Left mouse + drag: Add velocity and dye\n");
     printf("  R: Reset simulation\n");
     printf("  V: Toggle velocity visualization\n");
+    printf("  C: Toggle convergence stats\n");
     printf("  ESC: Quit\n");
 
     double lastTime = glfwGetTime();
+    double fpsTime = lastTime;
+    int frameCount = 0;
+    float fps = 0.0f;
 
     while (!glfwWindowShouldClose(window)) {
         double currentTime = glfwGetTime();
         float dt = (float)(currentTime - lastTime);
         lastTime = currentTime;
 
+        // Update FPS counter
+        frameCount++;
+        if (currentTime - fpsTime >= 1.0) {
+            fps = frameCount / (float)(currentTime - fpsTime);
+            frameCount = 0;
+            fpsTime = currentTime;
+        }
+
         // Clamp dt to avoid instability
         if (dt > 0.1f) dt = 0.1f;
 
         simulate(dt);
         render();
+
+        // Render stats overlay
+        char buf[64];
+        snprintf(buf, sizeof(buf), "FPS: %.1f", fps);
+        renderText(buf, 10, 10, 2.0f, 1.0f, 1.0f, 1.0f);
+
+        snprintf(buf, sizeof(buf), "Iterations: %d", pressureIterations);
+        renderText(buf, 10, 30, 2.0f, 1.0f, 1.0f, 1.0f);
+
+        snprintf(buf, sizeof(buf), "Omega: %.3f", pressureOmega);
+        renderText(buf, 10, 50, 2.0f, 1.0f, 1.0f, 1.0f);
+
+        snprintf(buf, sizeof(buf), "Grid: %dx%d", SIM_WIDTH, SIM_HEIGHT);
+        renderText(buf, 10, 70, 2.0f, 1.0f, 1.0f, 1.0f);
+
+        if (showConvergence) {
+            int preBins[3], preCounts[3], postBins[3], postCounts[3];
+            getTopBins(preBins, preCounts, postBins, postCounts);
+
+            renderText("Pre-projection (worst bins):", 10, 110, 2.0f, 1.0f, 0.8f, 0.5f);
+            for (int i = 0; i < 3 && preBins[i] != -1; i++) {
+                snprintf(buf, sizeof(buf), "  bin %d: %d cells", preBins[i], preCounts[i]);
+                renderText(buf, 10, 130 + i * 20, 2.0f, 1.0f, 0.8f, 0.5f);
+            }
+
+            renderText("Post-projection (worst bins):", 10, 210, 2.0f, 0.5f, 1.0f, 0.5f);
+            for (int i = 0; i < 3 && postBins[i] != -1; i++) {
+                snprintf(buf, sizeof(buf), "  bin %d: %d cells", postBins[i], postCounts[i]);
+                renderText(buf, 10, 230 + i * 20, 2.0f, 0.5f, 1.0f, 0.5f);
+            }
+        }
 
         glfwSwapBuffers(window);
         glfwPollEvents();
@@ -698,6 +995,11 @@ int main(void) {
     glDeleteProgram(addForceProgram);
     glDeleteProgram(divergenceStatsProgram);
     glDeleteProgram(renderProgram);
+    glDeleteProgram(textProgram);
+
+    glDeleteTextures(1, &fontTexture);
+    glDeleteVertexArrays(1, &textVAO);
+    glDeleteBuffers(1, &textVBO);
 
     glDeleteBuffers(1, &statsBuffer);
 

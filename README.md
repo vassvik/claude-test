@@ -245,7 +245,16 @@ To restore interactive mode, modify `main()` to use the window loop instead of `
 - Optimal omega is iteration-budget dependent, not just grid-size dependent
 - Theoretical ω_opt ≈ 1.988 assumes infinite iterations; practical optimal is lower
 
+### Known Issues / TODO
+
+**Convergence stats display bug (text overlay)**: When pressing 'C' to show convergence info, the pre and post projection bins show nearly identical values, even though the simulation visually looks correct and previous convergence testing showed clear improvement post-projection.
+
+Suspect the `getTopBins()` function in main.c has a bug - likely reading the histogram incorrectly or the stats buffer isn't being read at the right time. The histogram stores `[post * 32 + pre]` indexing, and the function sums columns for pre and rows for post, but something isn't working as expected.
+
+The earlier omega search tests (which printed tables to console) showed correct behavior, so compare against `printStats2DTable()` to find the discrepancy.
+
 ### Potential Next Steps
+- Fix convergence stats text display bug
 - Restore interactive mode with MAC-correct advection
 - Add viscosity (diffusion step)
 - Implement multigrid or other accelerated pressure solvers
