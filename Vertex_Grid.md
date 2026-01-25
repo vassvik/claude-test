@@ -1080,6 +1080,131 @@ Note that RBSOR on the corner stencil has a structural null space issue: modes l
 
 This is another reason the two-level approach (corner preconditioner + 27-point residual) works well: the 27-point stencil "sees" modes that the corner stencil treats as smooth.
 
+### Inlined Correction Stencil
+
+The correction step in the iterative algorithm (compute 27-point residual, solve corner system, update) can be simplified by combining multiple operations into a single stencil. This section derives the combined operation and its special properties.
+
+**Current Algorithm (steps 2-4 of outer iteration):**
+```
+r = d - L_full[p]           (27-point residual)
+Solve L_corner[e] = r       (full corner solve)
+p_new = p + ω·e             (update)
+```
+
+**Simplification: Replace solve with one Jacobi iteration**
+
+Instead of fully solving L_corner[e] = r, perform a single weighted Jacobi iteration starting from e = 0:
+
+```
+r = d - L_full[p]                    (27-point residual)
+e = ω_J · D_corner⁻¹ · r             (one weighted Jacobi iteration from e=0)
+p_new = p + ω·e                      (update)
+```
+
+Where D_corner = -8/(4h²) = -2/h² is the center coefficient of L_corner.
+
+**Deriving the Combined Operation**
+
+Substituting the Jacobi iteration into the update:
+```
+e = ω_J · (-h²/2) · r
+p_new = p + ω · ω_J · (-h²/2) · (d - L_full[p])
+      = p - α·d + α·L_full[p]
+```
+
+where **α = ω · ω_J · h²/2**
+
+**Resulting Stencil Coefficients**
+
+The L_full stencil (×1/16h²): center=-24, face=-4, edge=+2, corner=+3
+
+For the combined operation p_new = p + α·L_full[p] - α·d:
+
+| Neighbor | L_full coeff | × α/(16h²) | Combined (p + α·L_full) |
+|----------|--------------|------------|-------------------------|
+| Center   | -24          | -24α/16h²  | 1 - 3α/(2h²)           |
+| Face (×6)| -4           | -4α/16h²   | -α/(4h²)               |
+| Edge (×12)| +2          | +2α/16h²   | +α/(8h²)               |
+| Corner (×8)| +3         | +3α/16h²   | +3α/(16h²)             |
+
+**Special Case: ω·ω_J = 4/3**
+
+With ω = 4/3 and ω_J = 1 (or any combination giving ω·ω_J = 4/3):
+
+**α = (4/3) · h²/2 = 2h²/3**
+
+Substituting α into the coefficients:
+- Center: 1 - 3·(2h²/3)/(2h²) = 1 - 1 = **0**
+- Face: -(2h²/3)/(4h²) = **-1/6**
+- Edge: (2h²/3)/(8h²) = **+1/12**
+- Corner: 3·(2h²/3)/(16h²) = **+1/8**
+
+**The center coefficient vanishes!**
+
+**The Correction Stencil (ω·ω_J = 4/3)**
+
+```
+p_new[i,j,k] = (1/8)·Σ(corners) + (1/12)·Σ(edges) - (1/6)·Σ(faces) - (2h²/3)·d[i,j,k]
+```
+
+**Verification:** Sum of neighbor weights = 8·(1/8) + 12·(1/12) + 6·(-1/6) = 1 + 1 - 1 = **1** ✓
+
+This is a weighted average of 26 neighbors (weights sum to 1) minus a scaled source term.
+
+**Interpretation: Pure Neighbor Averaging**
+
+The correction operation is a **pure neighbor averaging** that:
+1. Pulls toward corner neighbors (weight 1/8 each, total contribution 1)
+2. Pulls toward edge neighbors (weight 1/12 each, total contribution 1)
+3. Pushes away from face neighbors (weight -1/6 each, total contribution -1)
+4. Subtracts a scaled divergence source
+
+The negative face weight is fascinating—it's "anti-diffusing" in the face directions while "diffusing" along diagonals. This mirrors the structure of the full 27-point stencil, where face neighbors also have negative coefficients.
+
+**Algorithm with Inlined Correction**
+
+```
+1. Solve L_corner[p₀] = d                    (multigrid - full solve)
+2. Apply correction stencil:
+   p₁[i,j,k] = (1/8)·Σ corners + (1/12)·Σ edges - (1/6)·Σ faces - (2h²/3)·d
+3. Check convergence: ||d - L_full[p₁]|| < ε
+4. If not converged, repeat from step 1 (or just step 2 for more corrections)
+```
+
+**Critical Caveat: The Correction Alone Diverges**
+
+The iteration p_{k+1} = (I + α·L_full)·p_k - α·d has iteration matrix M = I + α·L_full.
+
+For stability: ρ(M) < 1, i.e., |1 + α·λ| < 1 for all eigenvalues λ of L_full.
+
+The most negative eigenvalue of L_full is approximately λ_min ≈ -6/h² (Laplacian scaling).
+
+With α = 2h²/3:
+```
+1 + α·λ_min ≈ 1 + (2h²/3)·(-6/h²) = 1 - 4 = -3
+```
+
+**The correction stencil alone diverges!** The corner solve is essential—it brings p close enough to the solution that residuals are small, and the correction handles only the remaining L_full - L_corner discrepancy.
+
+**Practical Value**
+
+The combined stencil is useful as:
+1. **Single-pass correction** after corner solve (replaces residual + iterative solve with one 27-point pass)
+2. **Simpler implementation** (one stencil instead of residual computation + iterative correction solve)
+3. **GPU-friendly** (single dispatch, no synchronization between residual and correction)
+
+**Not useful** as a standalone solver (diverges without the corner solve providing a good initial approximation).
+
+**Two Jacobi Iterations: Expanded Stencil**
+
+For completeness, we note that using two Jacobi iterations instead of one expands the stencil significantly:
+
+- **1 iteration:** 3×3×3 = 27 point stencil (just scales the residual pointwise by D⁻¹)
+- **2 iterations:** 5×5×5 = 125 point stencil (corner neighbors' residuals contribute)
+- **k iterations:** (2k+1)³ point stencil
+
+Each additional iteration expands the stencil by 2 in each dimension (corners of corners of corners...). The added complexity of larger stencils typically outweighs the benefit. For GPU implementation, the 27-point stencil is already at the edge of shared memory efficiency. If more accuracy is needed, doing multiple outer iterations (each with a fresh corner solve) is more practical than expanding the correction stencil.
+
 ---
 
 ## Lattice Decoupling and Cache Optimization
