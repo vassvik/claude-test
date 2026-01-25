@@ -984,6 +984,102 @@ The analysis suggests a two-level approach:
 
 This separates the "heavy lifting" (global pressure solve via multigrid on corner stencil) from the "consistency correction" (local smoothing via damped Jacobi on full stencil).
 
+### Spectral Analysis of the Corner Stencil
+
+The corner stencil (9-point BCC-like) is well-behaved for iterative methods, making it ideal for the preconditioner role.
+
+**Jacobi eigenvalue:**
+
+For the corner stencil, the Jacobi iteration eigenvalue is simply:
+
+μ_J = S₃ = cos(k_x h) cos(k_y h) cos(k_z h)
+
+This ranges from -1 to +1 across all modes.
+
+**Weighted Jacobi for multigrid smoothing:**
+
+For damped/weighted Jacobi with parameter ω, the iteration eigenvalue is:
+
+λ(ω) = 1 - ω(1 - μ_J) = 1 - ω + ω·S₃
+
+The smoothing factor (spectral radius over high-frequency modes) depends on the target mode range:
+
+| Target |μ| range | Optimal ω | Smoothing factor |
+|-------------------|-----------|------------------|
+| All modes (|μ| ≤ 1) | 2/3 | 1/3 |
+| High-freq only (|μ| ≤ 0.5) | 8/9 | ~0.33 |
+
+For multigrid, ω = 2/3 is a safe choice. If you know coarse grids handle |μ| > 0.5 modes well, ω = 8/9 can be slightly faster.
+
+**Red-Black SOR for multigrid smoothing:**
+
+The corner stencil has perfect Red-Black structure: all 8 corner neighbors flip all three parities, so neighbors are always opposite color. This makes RBSOR natural.
+
+For RBSOR with parameter ω, the eigenvalue behavior depends on the Jacobi eigenvalue μ:
+
+**Complex regime** (|μ| < μ_c where μ_c = 2√(ω-1)/ω):
+- Eigenvalues are complex conjugates with |λ| = ω - 1
+- All modes in this regime have identical convergence rate
+
+**Real regime** (|μ| ≥ μ_c):
+- Eigenvalues are real: λ = (ω|μ| ± √(ω²μ² - 4(ω-1)))/2
+- Larger |μ| means slower convergence
+
+For ω = 1 (standard Gauss-Seidel): ρ = μ² (good for small |μ|, poor for |μ| → 1)
+
+**Over-relaxation improves smoothing:**
+
+For multigrid smoothing, we only need to damp high-frequency modes—smooth modes are handled by coarse grids. Over-relaxation (ω > 1) pushes more modes into the complex regime where ρ = ω - 1.
+
+The crossover point μ_c = 2√(ω-1)/ω:
+
+| ω | μ_c | Complex regime ρ |
+|-----|------|------------------|
+| 1.0 | 0 | N/A |
+| 1.1 | 0.57 | 0.10 |
+| 1.15 | 0.67 | 0.15 |
+| 1.2 | 0.75 | 0.20 |
+| 1.3 | 0.87 | 0.30 |
+
+**Optimal ω for smoothing:**
+
+The classical SOR optimization, applied to modes up to |μ| = μ_max, gives:
+
+ω_opt = 2 / (1 + √(1 - μ_max²))
+
+with smoothing factor ν = ω_opt - 1.
+
+| μ_max | ω_opt | Smoothing factor |
+|-------|-------|------------------|
+| 0.5 | 1.07 | 0.07 |
+| 0.6 | 1.11 | 0.11 |
+| 0.7 | 1.17 | 0.17 |
+| 0.8 | 1.25 | 0.25 |
+
+For multigrid with 2:1 coarsening, modes with |μ| ≲ 0.5-0.7 typically need smoothing. This gives:
+
+- **ω = 1.1-1.15** for conservative smoothing (targets |μ| ≤ 0.5-0.6)
+- **ω = 1.15-1.2** for aggressive smoothing (targets |μ| ≤ 0.7)
+
+**Grid size independence:**
+
+The optimal ω for smoothing does **not** depend on grid size N. This is because:
+
+1. High-frequency modes have the same μ distribution regardless of N
+2. The coarse grid correction capability (what modes it handles) depends on the coarsening ratio, not absolute size
+3. Smoothing factors are defined over mode ranges, not specific wavelengths
+
+What changes with N is the number of V-cycles needed (roughly O(log N) for full multigrid), but not the per-cycle smoothing quality or optimal ω.
+
+**Null space consideration:**
+
+Note that RBSOR on the corner stencil has a structural null space issue: modes like (π, π, 0) have μ = (-1)(-1)(1) = 1, which acts like a "smooth" mode for the corner operator. These modes:
+- Are not smoothed efficiently by RBSOR alone
+- Must be handled by the coarse grid correction
+- Are recoupled through the 27-point residual in the outer iteration
+
+This is another reason the two-level approach (corner preconditioner + 27-point residual) works well: the 27-point stencil "sees" modes that the corner stencil treats as smooth.
+
 ---
 
 ## Lattice Decoupling and Cache Optimization
