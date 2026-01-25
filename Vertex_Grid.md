@@ -901,6 +901,89 @@ With ω = 4/3, the method converges in just a few iterations. Combined with mult
 - Consider storing sublattices separately for corner solve
 - Or use stride-2 access with careful cache management
 
+### Spectral Analysis of the 27-Point Stencil
+
+When solving the 27-point system directly (e.g., for residual correction), the negative face coefficients (-4) cause significant problems for standard iterative methods.
+
+**Fourier mode notation:**
+
+For a mode with wavevector **k**, define:
+- c_x = cos(k_x h), c_y = cos(k_y h), c_z = cos(k_z h)
+- S₁ = c_x + c_y + c_z
+- S₂ = c_x c_y + c_x c_z + c_y c_z
+- S₃ = c_x c_y c_z
+
+**Jacobi iteration:**
+
+The Jacobi iteration matrix eigenvalue for a Fourier mode is:
+
+μ_J = −S₁/3 + S₂/3 + S₃
+
+For mode (π, 0, 0): S₁ = 1, S₂ = −1, S₃ = −1, giving **μ_J = −5/3** (unstable).
+
+The stencil is not diagonally dominant: |center| = 24, but Σ|off-diagonal| = 72.
+
+**Stability requirements for damped Jacobi:**
+
+For damped Jacobi with parameter ω, the eigenvalue becomes μ(ω) = 1 − ω(1 − μ_J).
+
+The worst mode (π, 0, 0) requires:
+- **ω < 3/4** for stability
+- **ω ≈ 6/11 ≈ 0.55** for optimal convergence (spectral radius ≈ 0.45)
+
+This matches empirical observations of optimal ω in the range 0.5–0.6.
+
+**8-color Gauss-Seidel:**
+
+With 8 colors based on (i mod 2, j mod 2, k mod 2), same-color points never neighbor each other in the 27-point stencil. However, the 8×8 sublattice iteration matrix for mode (π, 0, 0) has **spectral radius ≈ 1.95** — still unstable.
+
+The negative face coefficients cause instability even with multicolored GS.
+
+**Sequential (lexicographic) Gauss-Seidel:**
+
+For sequential GS, "past" and "future" neighbors are determined by lexicographic ordering. The GS eigenvalue is:
+
+μ_GS = −λ_U / (d + λ_L)
+
+where λ_L and λ_U are the coupling sums for past/future neighbors.
+
+For mode (π, 0, 0): λ_L = λ_U = −20, d = −24, giving **μ_GS = −5/11 ≈ −0.45** (stable).
+
+Sequential GS works because "past" neighbors include same-color points (in the 8-color sense), providing additional coupling that stabilizes the iteration.
+
+**Hybrid Red-Black (ping-pong) approach:**
+
+Red-Black coloring based on (i+j+k) mod 2:
+- Face neighbors: opposite color (GS treatment)
+- Edge neighbors: same color (Jacobi treatment)
+- Corner neighbors: opposite color (GS treatment)
+
+The 2×2 iteration matrix for red/black amplitudes has a structural property: when |1−a| = |b| (where a = edge coupling, b = face+corner coupling), the eigenvalue **λ = 1 persists for all ω**.
+
+For mode (π, 0, 0): |1−a| = |b| = 4/3, so this mode has **λ = 1** (marginal stability).
+
+This explains empirical observations of the hybrid approach "not converging well" — problematic modes persist indefinitely without growing or shrinking.
+
+**Solver comparison for the 27-point stencil:**
+
+| Method | Mode (π,0,0) | Parallelism | Notes |
+|--------|--------------|-------------|-------|
+| Plain Jacobi | ρ = 5/3 | Full | Unstable |
+| Damped Jacobi (ω ≈ 0.55) | ρ ≈ 0.45 | Full | Stable, ~17 iter to 10⁻⁶ |
+| 8-color GS | ρ ≈ 1.95 | Full | Unstable |
+| Hybrid Red-Black | ρ = 1 | Partial | Marginal (modes persist) |
+| Sequential GS | ρ ≈ 0.45 | None | Stable, but serial |
+
+**Practical solver strategy:**
+
+The analysis suggests a two-level approach:
+
+1. **Corner stencil + Multigrid + Red-Black SOR**: Main solver for global pressure solve. The corner stencil is well-behaved (diagonally dominant), and Red-Black works perfectly since all corner neighbors flip parity.
+
+2. **Damped Jacobi on 27-point** (ω ≈ 0.55): Residual correction for consistency. Fully parallel, stable, handles the difference between L_corner and L_full. Only a few iterations needed since it's correcting a small residual.
+
+This separates the "heavy lifting" (global pressure solve via multigrid on corner stencil) from the "consistency correction" (local smoothing via damped Jacobi on full stencil).
+
 ---
 
 ## Lattice Decoupling and Cache Optimization
