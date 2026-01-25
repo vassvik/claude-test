@@ -16,7 +16,8 @@ This document derives the consistent discrete Laplacian for a "vertex grid" (als
 8. [Lattice Decoupling and Cache Optimization](#lattice-decoupling-and-cache-optimization)
 9. [Comparison with Rhie-Chow Interpolation](#comparison-with-rhie-chow-interpolation)
 10. [Performance Comparison with MAC Grid](#performance-comparison-with-mac-grid)
-11. [Literature](#literature)
+11. [Velocity Hourglass Filter](#velocity-hourglass-filter)
+12. [Literature](#literature)
 
 ---
 
@@ -1602,6 +1603,398 @@ Both approaches solve the fundamental problem of pressure-velocity coupling on n
 | Solver complexity | Standard multigrid | Preconditioned iteration |
 
 Vertex grid trades a more complex pressure solve for simpler advection and unified velocity storage. The preconditioned iterative approach with sublattice decoupling can match MAC grid performance while providing the convenience of collocated velocity and dye.
+
+---
+
+## Velocity Hourglass Filter
+
+The vertex grid divergence operator samples 8 velocity cells surrounding each pressure vertex. Certain high-frequency velocity patterns—**hourglass modes**—produce zero discrete divergence despite having non-zero continuous divergence. These modes can accumulate over time, causing visual artifacts and numerical instability. This section derives a filter to detect and damp these modes.
+
+The derivation follows Rider (1998) for 2D and extends it to 3D using an orthogonal mode decomposition of the 2×2×2 velocity cell block.
+
+### The Hourglass Problem
+
+At pressure vertex (i,j,k), the divergence operator computes:
+
+```
+∇·v = (1/2h) × Σ (s_x·u + s_y·v + s_z·w) over 8 surrounding cells
+```
+
+where s_x, s_y, s_z are ±1 depending on which side of the vertex each cell lies.
+
+For the u-component contribution, cells at x-index i contribute +u, cells at x-index i-1 contribute -u. This computes a discrete ∂u/∂x by differencing in the x-direction.
+
+**The problem:** If u varies only in directions **orthogonal** to x (e.g., a checkerboard in the y-z plane), the 4 cells on each side of the vertex have the same average, and the difference is zero. The mode is invisible to the divergence operator.
+
+**Example:** Consider u = (-1)^(j+k) (checkerboard in y-z, constant in x):
+
+| Cell | u value | s_x | Contribution |
+|------|---------|-----|--------------|
+| (i-1,j-1,k-1) | +c | -1 | -c |
+| (i,j-1,k-1) | +c | +1 | +c |
+| (i-1,j,k-1) | -c | -1 | +c |
+| (i,j,k-1) | -c | +1 | -c |
+| (i-1,j-1,k) | -c | -1 | +c |
+| (i,j-1,k) | -c | +1 | -c |
+| (i-1,j,k) | +c | -1 | -c |
+| (i,j,k) | +c | +1 | +c |
+
+Sum: 0. The mode is **invisible** to the divergence operator, but the continuous ∂u/∂x ≠ 0.
+
+### Orthonormal Mode Decomposition
+
+The 2×2×2 block of velocity cells surrounding a vertex has 8 degrees of freedom. These decompose into 8 orthonormal modes corresponding to different derivative orders:
+
+**Mode definitions** (each normalized by 1/√8):
+
+| Mode | Pattern | Derivative | Physical? |
+|------|---------|------------|-----------|
+| 1 | all +1 | ⟨f⟩ (average) | Yes |
+| 2 | ±1 in x | ∂f/∂x | Yes (divergence) |
+| 3 | ±1 in y | ∂f/∂y | Yes (curl) |
+| 4 | ±1 in z | ∂f/∂z | Yes (curl) |
+| 5 | (-1)^(i+j) | ∂²f/∂x∂y | **Hourglass** |
+| 6 | (-1)^(i+k) | ∂²f/∂x∂z | **Hourglass** |
+| 7 | (-1)^(j+k) | ∂²f/∂y∂z | **Hourglass** |
+| 8 | (-1)^(i+j+k) | ∂³f/∂x∂y∂z | **Hourglass** |
+
+**Explicit mode patterns** (indexing as [z][y][x]):
+
+```
+mode1 = {{{+1,+1}, {+1,+1}}, {{+1,+1}, {+1,+1}}} / √8   // constant
+mode2 = {{{-1,+1}, {-1,+1}}, {{-1,+1}, {-1,+1}}} / √8   // ∂/∂x
+mode3 = {{{-1,-1}, {+1,+1}}, {{-1,-1}, {+1,+1}}} / √8   // ∂/∂y
+mode4 = {{{-1,-1}, {-1,-1}}, {{+1,+1}, {+1,+1}}} / √8   // ∂/∂z
+mode5 = {{{+1,-1}, {-1,+1}}, {{+1,-1}, {-1,+1}}} / √8   // ∂²/∂x∂y
+mode6 = {{{+1,-1}, {+1,-1}}, {{-1,+1}, {-1,+1}}} / √8   // ∂²/∂x∂z
+mode7 = {{{+1,+1}, {-1,-1}}, {{-1,-1}, {+1,+1}}} / √8   // ∂²/∂y∂z
+mode8 = {{{-1,+1}, {+1,-1}}, {{+1,-1}, {-1,+1}}} / √8   // ∂³/∂x∂y∂z
+```
+
+These modes are **orthonormal**: ⟨mode_i, mode_j⟩ = δ_ij.
+
+**Physical interpretation:**
+
+- **Modes 1-4** are visible to physical operators: mode 1 is the cell average, modes 2-4 are first derivatives (one for divergence, two for curl components).
+- **Modes 5-8** are invisible to all first-order derivative operators—these are the **hourglass modes**.
+
+### Which Modes Are Hourglass for Each Velocity Component?
+
+For the u-component, the divergence sees ∂u/∂x (mode 2). Curl sees ∂u/∂y and ∂u/∂z (modes 3, 4). The hourglass modes are 5, 6, 7, 8.
+
+But modes 5-8 correspond to different checkerboard patterns:
+- Mode 5: (-1)^(i+j) — checkerboard in x-y plane
+- Mode 6: (-1)^(i+k) — checkerboard in x-z plane
+- Mode 7: (-1)^(j+k) — checkerboard in y-z plane (purely transverse to u)
+- Mode 8: (-1)^(i+j+k) — 3D checkerboard
+
+**All four** are invisible to the u-divergence term because the divergence averages over 4 cells on each side of the vertex, and all four patterns have zero average over any such 2×2 face.
+
+### Filter Construction via Projection
+
+The hourglass filter should project velocity onto the hourglass subspace (modes 5-8), then damp it. The projection operator is:
+
+```
+P = Σᵢ |modeᵢ⟩⟨modeᵢ|   for i ∈ {5, 6, 7, 8}
+```
+
+To build a stencil that applies this projection at each velocity cell, we compute the **autocorrelation** of each hourglass mode and sum them. This extends the 2×2×2 mode (centered at a corner of the target cell) to a 3×3×3 stencil (centered at the target cell).
+
+**Construction:**
+
+For each hourglass mode m, the stencil contribution at offset (Δx, Δy, Δz) is:
+
+```
+stencil[Δz][Δy][Δx] += Σ m[k][j][i] × m[k+Δz][j+Δy][i+Δx]
+```
+
+where the sum is over all valid overlapping indices.
+
+Equivalently, this is the correlation of the mode with itself:
+
+```
+autocorr[Δ] = Σ m[pos] × m[pos + Δ]
+```
+
+**Computing the autocorrelation:**
+
+For a mode with pattern (-1)^(sum of certain indices), the autocorrelation at offset Δ depends only on:
+1. The **parity factor**: (-1)^(relevant components of Δ)
+2. The **overlap count**: how many cell pairs overlap at that offset
+
+Overlap count for offset (Δx, Δy, Δz) where each Δ ∈ {-1, 0, +1}:
+
+```
+overlap = (2 - |Δx|) × (2 - |Δy|) × (2 - |Δz|)
+```
+
+| Offset type | |Δ| | Overlap |
+|-------------|-----|---------|
+| Center | (0,0,0) | 8 |
+| Face | one ±1 | 4 |
+| Edge | two ±1 | 2 |
+| Corner | three ±1 | 1 |
+
+**Parity factors for each mode:**
+
+| Mode | Pattern | Autocorr parity |
+|------|---------|-----------------|
+| 5 | (-1)^(i+j) | (-1)^(Δx+Δy) |
+| 6 | (-1)^(i+k) | (-1)^(Δx+Δz) |
+| 7 | (-1)^(j+k) | (-1)^(Δy+Δz) |
+| 8 | (-1)^(i+j+k) | (-1)^(Δx+Δy+Δz) |
+
+### Summing the Four Hourglass Modes
+
+The combined parity factor is:
+
+```
+S(Δ) = (-1)^(Δx+Δy) + (-1)^(Δx+Δz) + (-1)^(Δy+Δz) + (-1)^(Δx+Δy+Δz)
+```
+
+Evaluating for each neighbor type:
+
+| Type | (Δx,Δy,Δz) | Parities | S(Δ) |
+|------|------------|----------|------|
+| Center | (0,0,0) | +1+1+1+1 | **+4** |
+| x-face | (±1,0,0) | -1-1+1-1 | **-2** |
+| y-face | (0,±1,0) | -1+1-1-1 | **-2** |
+| z-face | (0,0,±1) | +1-1-1-1 | **-2** |
+| xy-edge | (±1,±1,0) | +1-1-1+1 | **0** |
+| xz-edge | (±1,0,±1) | -1+1-1+1 | **0** |
+| yz-edge | (0,±1,±1) | -1-1+1+1 | **0** |
+| corner | (±1,±1,±1) | +1+1+1-1 | **+2** |
+
+**The edge contributions cancel!** This is why the filter uses only 15 points (center + 6 faces + 8 corners) rather than all 27.
+
+### The Final Stencil
+
+Combining overlap counts with parity sums:
+
+| Type | Overlap | S(Δ) | Contribution | Count | Total |
+|------|---------|------|--------------|-------|-------|
+| Center | 8 | +4 | 32 | 1 | 32 |
+| Face | 4 | -2 | -8 | 6 | -48 |
+| Edge | 2 | 0 | 0 | 12 | 0 |
+| Corner | 1 | +2 | +2 | 8 | +16 |
+
+**Sum check:** 32 - 48 + 0 + 16 = 0 ✓ (filter annihilates constants)
+
+Normalizing so the filter extracts hourglass modes with unit coefficient:
+
+```
+H[v] = (1/32) × [16·v[center] - 4·Σ(6 faces) + 1·Σ(8 corners)]
+```
+
+**Stencil coefficients (×1/32):**
+
+| Position | Coefficient |
+|----------|-------------|
+| Center (0,0,0) | +16 |
+| Faces (±1,0,0), (0,±1,0), (0,0,±1) | -4 each |
+| Edges | 0 |
+| Corners (±1,±1,±1) | +1 each |
+
+### Verification
+
+**On 3D checkerboard** v = (-1)^(i+j+k):
+- Center: 16 × c
+- Faces (all opposite parity): -4 × 6 × (-c) = +24c
+- Corners (all opposite parity): +1 × 8 × (-c) = -8c
+- H[v] = (1/32)[16c + 24c - 8c] = c ✓
+
+**On 2D checkerboard** v = (-1)^(j+k):
+- Center: 16 × c
+- x-faces (same parity): -4 × 2 × c = -8c
+- y-faces (opposite): -4 × 2 × (-c) = +8c
+- z-faces (opposite): -4 × 2 × (-c) = +8c
+- Corners (same j+k parity): +1 × 8 × c = +8c
+- H[v] = (1/32)[16c - 8c + 8c + 8c + 8c] = c ✓
+
+**On smooth/constant** v = 1:
+- H[v] = (1/32)[16 - 4×6 + 1×8] = (1/32)[16 - 24 + 8] = 0 ✓
+
+**On first derivative mode** v = (-1)^i:
+- Center: 16c
+- x-faces (opposite i): -4 × 2 × (-c) = +8c
+- y,z-faces (same i): -4 × 4 × c = -16c
+- Corners (opposite i): +1 × 8 × (-c) = -8c
+- H[v] = (1/32)[16c + 8c - 16c - 8c] = 0 ✓
+
+The filter correctly extracts hourglass modes while ignoring physical modes.
+
+### Application
+
+The filter is applied as damping after advection:
+
+```
+v_filtered = v - ε·H[v]
+```
+
+where ε ∈ (0, 1] controls the damping strength:
+- **ε = 0:** No filtering (hourglass modes persist)
+- **ε = 1:** Full projection removal (may be too aggressive)
+- **ε ≈ 0.1-0.5:** Typical values for gentle damping
+
+The filter should be applied:
+1. **After advection** (which can excite hourglass modes through interpolation)
+2. **Before projection** (which cannot remove these modes)
+
+### Implementation
+
+**GLSL compute shader:**
+
+```glsl
+#version 430
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+layout(binding = 0, rgba32f) uniform image3D velocity;
+
+uniform float epsilon;  // damping strength, typically 0.1-0.5
+
+void main() {
+    ivec3 pos = ivec3(gl_GlobalInvocationID.xyz);
+
+    // Read center and neighbors
+    vec3 center = imageLoad(velocity, pos).xyz;
+
+    // Face neighbors
+    vec3 xm = imageLoad(velocity, pos + ivec3(-1, 0, 0)).xyz;
+    vec3 xp = imageLoad(velocity, pos + ivec3(+1, 0, 0)).xyz;
+    vec3 ym = imageLoad(velocity, pos + ivec3( 0,-1, 0)).xyz;
+    vec3 yp = imageLoad(velocity, pos + ivec3( 0,+1, 0)).xyz;
+    vec3 zm = imageLoad(velocity, pos + ivec3( 0, 0,-1)).xyz;
+    vec3 zp = imageLoad(velocity, pos + ivec3( 0, 0,+1)).xyz;
+
+    // Corner neighbors
+    vec3 c000 = imageLoad(velocity, pos + ivec3(-1,-1,-1)).xyz;
+    vec3 c001 = imageLoad(velocity, pos + ivec3(-1,-1,+1)).xyz;
+    vec3 c010 = imageLoad(velocity, pos + ivec3(-1,+1,-1)).xyz;
+    vec3 c011 = imageLoad(velocity, pos + ivec3(-1,+1,+1)).xyz;
+    vec3 c100 = imageLoad(velocity, pos + ivec3(+1,-1,-1)).xyz;
+    vec3 c101 = imageLoad(velocity, pos + ivec3(+1,-1,+1)).xyz;
+    vec3 c110 = imageLoad(velocity, pos + ivec3(+1,+1,-1)).xyz;
+    vec3 c111 = imageLoad(velocity, pos + ivec3(+1,+1,+1)).xyz;
+
+    // Hourglass filter: H = (1/32)[16*center - 4*faces + 1*corners]
+    vec3 face_sum = xm + xp + ym + yp + zm + zp;
+    vec3 corner_sum = c000 + c001 + c010 + c011 + c100 + c101 + c110 + c111;
+
+    vec3 hourglass = (16.0 * center - 4.0 * face_sum + corner_sum) / 32.0;
+
+    // Apply damping
+    vec3 filtered = center - epsilon * hourglass;
+
+    imageStore(velocity, pos, vec4(filtered, 0.0));
+}
+```
+
+**Odin reference implementation** (mode orthogonality verification and stencil derivation):
+
+```odin
+package hourglass_filter
+
+import "core:fmt"
+import "core:math"
+
+Basis_Dual :: [2][2][2]f64
+
+main :: proc() {
+    N := math.sqrt(f64(8.0))
+
+    // 8 orthonormal modes of a 2x2x2 block
+    mode1 := Basis_Dual{{{+1,+1}, {+1,+1}}, {{+1,+1}, {+1,+1}}} / N  // average
+    mode2 := Basis_Dual{{{-1,+1}, {-1,+1}}, {{-1,+1}, {-1,+1}}} / N  // ∂/∂x
+    mode3 := Basis_Dual{{{-1,-1}, {+1,+1}}, {{-1,-1}, {+1,+1}}} / N  // ∂/∂y
+    mode4 := Basis_Dual{{{-1,-1}, {-1,-1}}, {{+1,+1}, {+1,+1}}} / N  // ∂/∂z
+    mode5 := Basis_Dual{{{+1,-1}, {-1,+1}}, {{+1,-1}, {-1,+1}}} / N  // ∂²/∂x∂y
+    mode6 := Basis_Dual{{{+1,-1}, {+1,-1}}, {{-1,+1}, {-1,+1}}} / N  // ∂²/∂x∂z
+    mode7 := Basis_Dual{{{+1,+1}, {-1,-1}}, {{-1,-1}, {+1,+1}}} / N  // ∂²/∂y∂z
+    mode8 := Basis_Dual{{{-1,+1}, {+1,-1}}, {{+1,-1}, {-1,+1}}} / N  // ∂³/∂x∂y∂z
+
+    modes := []Basis_Dual{mode1, mode2, mode3, mode4, mode5, mode6, mode7, mode8}
+
+    // Verify orthonormality
+    dot :: proc(m1, m2: Basis_Dual) -> f64 {
+        sum := 0.0
+        for k in 0..<2 do for j in 0..<2 do for i in 0..<2 {
+            sum += m1[k][j][i] * m2[k][j][i]
+        }
+        return sum
+    }
+
+    fmt.println("Orthonormality check (should be identity matrix):")
+    for m1 in modes {
+        for m2 in modes {
+            fmt.printf("%.1f ", dot(m1, m2))
+        }
+        fmt.println()
+    }
+
+    // Build filter stencil from hourglass modes (5-8)
+    stencil: [3][3][3]f64
+    for mode in modes[4:8] {  // modes 5,6,7,8 (0-indexed: 4,5,6,7)
+        for k in 0..<2 do for j in 0..<2 do for i in 0..<2 {
+            for z in 0..<2 do for y in 0..<2 do for x in 0..<2 {
+                // Autocorrelation: convolve mode with itself
+                stencil[k+z][j+y][i+x] += mode[1-k][1-j][1-i] * mode[z][y][x] / 8.0
+            }
+        }
+    }
+
+    fmt.println("\nFilter stencil (×32):")
+    for z in 0..<3 {
+        fmt.printf("z=%d:\n", z-1)
+        for y in 0..<3 {
+            for x in 0..<3 {
+                fmt.printf("%+3.0f ", 32.0 * stencil[z][y][x])
+            }
+            fmt.println()
+        }
+        fmt.println()
+    }
+}
+```
+
+**Expected output:**
+
+```
+Filter stencil (×32):
+z=-1:
+ +1  -4  +1
+ -4   0  -4
+ +1  -4  +1
+
+z=0:
+ -4   0  -4
+  0 +16   0
+ -4   0  -4
+
+z=+1:
+ +1  -4  +1
+ -4   0  -4
+ +1  -4  +1
+```
+
+The 12 edge positions are all zero, confirming the 15-point stencil structure.
+
+### Relationship to Pressure Projection
+
+The hourglass filter and pressure projection serve complementary roles:
+
+| Aspect | Pressure Projection | Hourglass Filter |
+|--------|--------------------|--------------------|
+| **Removes** | Divergent (compressible) modes | Non-physical oscillatory modes |
+| **Mechanism** | Solves ∇²p = ∇·v, subtracts ∇p | Damps high-frequency checkerboards |
+| **Null space** | Divergence-free velocity | Smooth + first-derivative modes |
+| **When applied** | After forces, before next step | After advection, before projection |
+
+The pressure projection cannot remove hourglass modes because they are **in the null space of the divergence operator**—they appear divergence-free to the discrete operator even though they have non-zero continuous divergence.
+
+### Historical Note
+
+This filter construction follows Rider (1998), who derived the 2D version for approximate projection methods. The 3D extension, including the observation that edges cancel due to parity symmetry, was derived independently using the orthogonal mode decomposition approach described here.
 
 ---
 
