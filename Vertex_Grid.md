@@ -1,6 +1,6 @@
 # Vertex Grid (Dual Grid) Formulation for Fluid Simulation
 
-> **Disclaimer:** This document was written with AI assistance (Claude) and has not been formally peer-reviewed. While the mathematical derivations have been checked for internal consistency, errors may exist—particularly in the 3D analysis which appears to contradict published literature (see [Literature](#literature) section). The claim that Drikakis & Rider's 3D corner stencil is incorrect should be independently verified before being cited. Use at your own risk.
+> **Note:** The core derivations in this document were developed independently by the author between 2021 (2D) and 2022 (3D), and have been implemented in [EmberGen](https://jangafx.com/software/embergen/) since late 2022. This document is a later write-up of those techniques, produced with AI assistance (Claude). While the mathematical derivations have been checked for internal consistency and validated through practical implementation, the document has not been formally peer-reviewed. The 3D analysis appears to contradict published literature (see [Literature](#literature) section)—this discrepancy should be independently verified before being cited.
 
 This document derives the consistent discrete Laplacian for a "vertex grid" (also called dual grid) arrangement where **velocity lives at cell centers** and **pressure lives at vertices**. This is the dual of the standard MAC grid.
 
@@ -1362,7 +1362,7 @@ The assumption that corner-only works in 3D fails due to geometry:
 - **2D:** The diagonal neighbors of a square lattice form another square lattice (rotated 45°). Face neighbors cancel exactly in ∇·∇.
 - **3D:** The corner neighbors of a cubic lattice form a BCC lattice, which is geometrically distinct. Face and edge neighbors do **not** cancel.
 
-The full 27-point stencil derived in this document, with weights -24 (center), -4 (faces), +2 (edges), +3 (corners), appears to be a novel correction to the published literature. The decomposition into face:edge:corner with ratio -1:2:3, and the use of the corner stencil as a preconditioner rather than the exact operator, follow from this corrected derivation.
+The full 27-point stencil derived in this document, with weights -24 (center), -4 (faces), +2 (edges), +3 (corners), was derived independently by the author in 2022, prior to discovering the apparent error in Drikakis & Rider. The technique has been used in production in EmberGen since late 2022. The decomposition into face:edge:corner with ratio -1:2:3, and the use of the corner stencil as a preconditioner rather than the exact operator, follow from this corrected derivation.
 
 ### Related Approaches
 
