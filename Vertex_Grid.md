@@ -745,6 +745,32 @@ Output: p such that L_full[p] = d
 3. Return p
 ```
 
+### Physical Interpretation: Repeated Projection
+
+The iterative scheme has a beautiful physical interpretation. The "residual" computed with the full 27-point stencil is actually the **post-projection divergence**:
+
+```
+r = d - L_full[p]
+  = ∇·v* - ∇·(∇p)
+  = ∇·(v* - ∇p)
+  = ∇·v_projected
+```
+
+This means the iteration is literally **repeated projection**:
+
+```
+1. Solve L_corner[p₀] = ∇·v*           (approximate pressure)
+2. Project: v₁ = v* - ∇p₀              (apply pressure correction)
+3. Compute divergence: d₁ = ∇·v₁       (this IS the "residual"!)
+4. Solve L_corner[e] = d₁              (correction for remaining divergence)
+5. Project again: v₂ = v₁ - ω·∇e       (further correction)
+6. Repeat until ∇·v_k ≈ 0
+```
+
+The abstract algebraic view (preconditioned linear solve) and the physical view (iteratively removing remaining divergence) are the same thing. Each iteration projects the velocity and removes whatever divergence remains.
+
+This also explains why convergence is guaranteed: even an imperfect projection reduces divergence, and repeated application drives it to zero.
+
 ### Convergence Analysis
 
 Let p* be the true solution (L_full[p*] = d).
@@ -783,17 +809,39 @@ The spectral radius ρ(M) determines convergence:
 - Without relaxation (ω=1): ρ(M) ≈ 1/4, converges as (1/4)^k
 - With optimal ω: can achieve ρ(M) ≈ 0
 
-### Optimal Relaxation Parameter
+### Relaxation Parameter
 
-Set the iteration matrix to zero:
+**Simple estimate:** If L_corner⁻¹·L_full ≈ (3/4)·I, then setting M = 0 gives:
 ```
 1 - 3ω/4 = 0
 ω = 4/3
 ```
 
-**Optimal ω = 4/3**
+However, **this estimate has caveats:**
 
-This compensates for the corner stencil being "3/4 of" the full operator. Each correction is scaled up by 4/3 to account for the missing 1/4.
+The decomposition weights -1/4, 1/2, 3/4 sum to **1**, not 3/4:
+```
+-1/4 + 1/2 + 3/4 = 1
+```
+
+So L_full is a weighted average of three operators that all approximate ∇². The ratio L_corner⁻¹·L_full is not simply 3/4·I.
+
+**The actual situation:**
+
+L_face, L_edge, L_corner have different **spectral properties**. For a Fourier mode with wavevector k:
+- L_face eigenvalue involves cos(kᵢh) terms
+- L_edge eigenvalue involves cos(kᵢh)cos(kⱼh) products
+- L_corner eigenvalue involves cos(kₓh)cos(kᵧh)cos(kᵤh)
+
+The ratio λ_full(k)/λ_corner(k) varies across modes - it's not a constant.
+
+**Practical guidance:**
+
+- ω = 4/3 is a reasonable **starting estimate**
+- Some over-relaxation (ω > 1) is beneficial since corner alone undershoots for some modes
+- The true optimal ω depends on grid size, boundary conditions, and dominant modes
+- Empirical tuning or adaptive schemes may improve performance
+- For production code, consider testing ω in the range [1.0, 1.5]
 
 ### Expected Performance
 
