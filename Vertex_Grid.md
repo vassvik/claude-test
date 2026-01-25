@@ -1381,7 +1381,11 @@ The full 27-point stencil derived in this document, with weights -24 (center), -
 - **Bridson, R. (2015).** *Fluid Simulation for Computer Graphics.* CRC Press.
   - Standard reference for graphics-oriented fluid simulation
 
-### Modern Implementations
+### Production Implementations
+
+- **JangaFX EmberGen:** Uses the consistent 27-point operator derived in this document, with corner stencil as preconditioner. In production since late 2022.
+
+- **Autodesk Bifrost:** Uses a collocated velocity arrangement (the same dual grid structure, with velocity components collocated and pressure at dual locations). Rather than deriving the consistent operator, they "explored discretization and filtering methods from computational physics" to mitigate non-physical divergent modes. See Nielsen et al., ["A collocated spatially adaptive approach to smoke simulation in bifrost"](https://dl.acm.org/doi/10.1145/3214745.3214749), SIGGRAPH 2018.
 
 - **AMReX-Hydro NodalProjector:** https://amrex-fluids.github.io/amrex-hydro/docs_html/Projections.html
   - Modern implementation of nodal projection for cell-centered velocity
