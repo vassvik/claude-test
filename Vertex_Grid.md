@@ -1,5 +1,7 @@
 # Vertex Grid (Dual Grid) Formulation for Fluid Simulation
 
+> **Disclaimer:** This document was written with AI assistance (Claude) and has not been formally peer-reviewed. While the mathematical derivations have been checked for internal consistency, errors may exist—particularly in the 3D analysis which appears to contradict published literature (see [Literature](#literature) section). The claim that Drikakis & Rider's 3D corner stencil is incorrect should be independently verified before being cited. Use at your own risk.
+
 This document derives the consistent discrete Laplacian for a "vertex grid" (also called dual grid) arrangement where **velocity lives at cell centers** and **pressure lives at vertices**. This is the dual of the standard MAC grid.
 
 ## Table of Contents
