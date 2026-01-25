@@ -17,7 +17,8 @@ This document derives the consistent discrete Laplacian for a "vertex grid" (als
 9. [Comparison with Rhie-Chow Interpolation](#comparison-with-rhie-chow-interpolation)
 10. [Performance Comparison with MAC Grid](#performance-comparison-with-mac-grid)
 11. [Velocity Hourglass Filter](#velocity-hourglass-filter)
-12. [Literature](#literature)
+12. [Summary](#summary)
+13. [Literature](#literature)
 
 ---
 
@@ -28,6 +29,7 @@ This document derives the consistent discrete Laplacian for a "vertex grid" (als
 - **Key insight:** Corner stencil alone captures 75% of the operator and has identical 4th-order accuracy
 - **Solver strategy:** Use corner stencil as preconditioner with ω ≈ 4/3, converges in ~5 iterations
 - **Optimization:** Sublattice decoupling allows 4 independent solves with standard 7-point stencils
+- **Hourglass filter:** Required in 3D to damp velocity modes invisible to the divergence operator
 
 ---
 
@@ -161,7 +163,7 @@ To compute ∂u/∂x + ∂v/∂y at the vertex, we use central differences acros
 ∂u/∂x ≈ (u[i,j] + u[i,j-1] - u[i-1,j] - u[i-1,j-1]) / (2h)
 ```
 
-This is a central difference: cells on the right (i,*) minus cells on the left (i-1,*), divided by the horizontal distance (2h between cell centers diagonally).
+This is a central difference: cells on the right (i,*) minus cells on the left (i-1,*), divided by the horizontal distance 2h between cell center columns.
 
 **For ∂v/∂y:** Similarly:
 ```
@@ -688,10 +690,10 @@ The discrete divergence-of-gradient is L_full, not L_corner! So:
 
 The residual divergence is:
 ```
-∇·v_new = (-1/4·L_face + 1/2·L_edge - 1/4·L_corner)[p]
+∇·v_new = (1/4·L_face - 1/2·L_edge + 1/4·L_corner)[p]
 ```
 
-This is the "remainder" after subtracting the corner contribution.
+This is the difference between the operator you solved and the operator you applied.
 
 ### The Null Space Problem
 
@@ -1639,7 +1641,7 @@ For the u-component contribution, cells at x-index i contribute +u, cells at x-i
 | (i-1,j,k) | +c | -1 | -c |
 | (i,j,k) | +c | +1 | +c |
 
-Sum: 0. The mode is **invisible** to the divergence operator, but the continuous ∂u/∂x ≠ 0.
+Sum: 0. The mode is **invisible** to the divergence operator—a non-physical high-frequency oscillation that can grow unchecked.
 
 ### Orthonormal Mode Decomposition
 
@@ -2010,6 +2012,7 @@ This filter construction follows Drikakis & Rider (2005), Chapter 12, which deri
 | **Sublattice decoupling** | 2 independent | 4 independent (for corner) |
 | **Deinterlaced stencil** | Standard 5-point | Standard 7-point |
 | **Optimal preconditioner ω** | N/A (exact) | 4/3 |
+| **Hourglass filter needed** | No | Yes (corners+faces) |
 
 ### The Big Picture
 
