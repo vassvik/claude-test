@@ -13,6 +13,17 @@ This document derives the consistent discrete Laplacian for a "vertex grid" (als
 7. [Iterative Solution Strategy](#iterative-solution-strategy)
 8. [Lattice Decoupling and Cache Optimization](#lattice-decoupling-and-cache-optimization)
 9. [Comparison with Rhie-Chow Interpolation](#comparison-with-rhie-chow-interpolation)
+10. [Performance Comparison with MAC Grid](#performance-comparison-with-mac-grid)
+
+---
+
+## TL;DR
+
+- **2D:** Consistent Laplacian is the diagonal 5-point stencil (rotated standard stencil)
+- **3D:** Consistent Laplacian is a 27-point stencil with weights -24 (center), -4 (faces), +2 (edges), +3 (corners)
+- **Key insight:** Corner stencil alone captures 75% of the operator and has identical 4th-order accuracy
+- **Solver strategy:** Use corner stencil as preconditioner with ω ≈ 4/3, converges in ~5 iterations
+- **Optimization:** Sublattice decoupling allows 4 independent solves with standard 7-point stencils
 
 ---
 
@@ -829,26 +840,27 @@ So L_full is a weighted average of three operators that all approximate ∇². T
 **The actual situation:**
 
 L_face, L_edge, L_corner have different **spectral properties**. For a Fourier mode with wavevector k:
-- L_face eigenvalue involves cos(kᵢh) terms
-- L_edge eigenvalue involves cos(kᵢh)cos(kⱼh) products
-- L_corner eigenvalue involves cos(kₓh)cos(kᵧh)cos(kᵤh)
+- L_face eigenvalue involves cos(k_i·h) terms
+- L_edge eigenvalue involves cos(k_i·h)cos(k_j·h) products
+- L_corner eigenvalue involves cos(k_x·h)cos(k_y·h)cos(k_z·h)
 
 The ratio λ_full(k)/λ_corner(k) varies across modes - it's not a constant.
 
 **Practical guidance:**
 
-- ω = 4/3 is a reasonable **starting estimate**
-- Some over-relaxation (ω > 1) is beneficial since corner alone undershoots for some modes
-- The true optimal ω depends on grid size, boundary conditions, and dominant modes
-- Empirical tuning or adaptive schemes may improve performance
-- For production code, consider testing ω in the range [1.0, 1.5]
+The estimate ω = 4/3 comes from assuming L_corner⁻¹·L_full ≈ (3/4)·I, which is only approximate. In practice:
+
+- **Start with ω = 1.2-1.3** (slightly conservative)
+- **Monitor convergence rate** across iterations
+- **Adjust if needed** - optimal ω may depend on grid size and BCs
+- **Avoid ω > 1.5** which risks divergence for some modes
 
 ### Expected Performance
 
 | Relaxation | Convergence Rate | Iterations to 10⁻⁶ |
 |------------|------------------|-------------------|
 | ω = 1 | ~0.25 per iteration | ~10 |
-| ω = 4/3 | ~0.05 per iteration | ~2-3 |
+| ω = 4/3 | ~0.05 per iteration | ~5 |
 | ω = 4/3 (with FMG) | - | 1-2 |
 
 With ω = 4/3, the method converges in just a few iterations. Combined with multigrid for the corner solves, this is highly efficient.
@@ -869,6 +881,22 @@ With ω = 4/3, the method converges in just a few iterations. Combined with mult
 - ||r||_∞ < ε (max residual)
 - ||r||_2 < ε (RMS residual)
 - Relative reduction: ||r_k||/||r_0|| < ε
+
+### GPU Implementation
+
+**Corner solve (compute shader):**
+- Deinterlace pressure into 4 sublattice textures
+- Run Red-Black SOR on each (standard 7-point stencil)
+- Each sublattice is half resolution → fits in cache better
+
+**27-point residual:**
+- Single dispatch over all vertices
+- Sample all 27 neighbors (3×3×3 texture fetches)
+- Can use shared memory for the 3×3×3 block
+
+**Memory layout:**
+- Consider storing sublattices separately for corner solve
+- Or use stride-2 access with careful cache management
 
 ---
 
@@ -1253,6 +1281,20 @@ A 9-point cross with both h and 2h neighbors.
 - Simpler stencil shape
 
 Both approaches solve the fundamental problem of pressure-velocity coupling on non-staggered grids, but through different mechanisms.
+
+---
+
+## Performance Comparison with MAC Grid
+
+| Aspect | MAC Grid | Vertex Grid (3D) |
+|--------|----------|------------------|
+| Velocity textures | 3 (staggered sizes) | 1 (collocated) |
+| Pressure stencil | 7-point | 27-point (or 9-point preconditioned) |
+| Advection | Interpolate between grids | Direct (velocity collocated) |
+| Memory | ~1.5× for velocity | 1× |
+| Solver complexity | Standard multigrid | Preconditioned iteration |
+
+Vertex grid trades a more complex pressure solve for simpler advection and unified velocity storage. The preconditioned iterative approach with sublattice decoupling can match MAC grid performance while providing the convenience of collocated velocity and dye.
 
 ---
 
