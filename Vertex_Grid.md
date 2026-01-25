@@ -1610,7 +1610,7 @@ Vertex grid trades a more complex pressure solve for simpler advection and unifi
 
 The vertex grid divergence operator samples 8 velocity cells surrounding each pressure vertex. Certain high-frequency velocity patterns—**hourglass modes**—produce zero discrete divergence despite having non-zero continuous divergence. These modes can accumulate over time, causing visual artifacts and numerical instability. This section derives a filter to detect and damp these modes.
 
-The derivation follows Rider (1998) for 2D and extends it to 3D using an orthogonal mode decomposition of the 2×2×2 velocity cell block.
+The derivation follows Drikakis & Rider (2005), Chapter 12, for 2D and extends it to 3D using an orthogonal mode decomposition of the 2×2×2 velocity cell block.
 
 ### The Hourglass Problem
 
@@ -1994,7 +1994,7 @@ The pressure projection cannot remove hourglass modes because they are **in the 
 
 ### Historical Note
 
-This filter construction follows Rider (1998), who derived the 2D version for approximate projection methods. The 3D extension, including the observation that edges cancel due to parity symmetry, was derived independently using the orthogonal mode decomposition approach described here.
+This filter construction follows Drikakis & Rider (2005), Chapter 12, which derives the 2D version for approximate projection methods. The 3D extension, including the observation that edges cancel due to parity symmetry, was derived independently using the orthogonal mode decomposition approach described here.
 
 ---
 
