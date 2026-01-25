@@ -152,6 +152,10 @@ For N=512, this gives ω_opt ≈ 1.988. However, with finite iterations, a sligh
 
 The solver uses **Dirichlet boundary conditions** (p = 0 at domain boundaries) with **open/outflow** velocity boundaries where flow can exit freely.
 
+## Future Directions
+
+See [Vertex_Grid.md](Vertex_Grid.md) for an alternative grid formulation where velocity lives at cell centers and pressure at vertices (the dual of MAC). This document derives the consistent 27-point Laplacian stencil for 3D and an iterative solution strategy using the dominant 9-point corner stencil as a preconditioner.
+
 ## References
 
 - Stam, J. (1999). "Stable Fluids". SIGGRAPH 1999.
