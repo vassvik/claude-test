@@ -14,6 +14,7 @@ This document derives the consistent discrete Laplacian for a "vertex grid" (als
 8. [Lattice Decoupling and Cache Optimization](#lattice-decoupling-and-cache-optimization)
 9. [Comparison with Rhie-Chow Interpolation](#comparison-with-rhie-chow-interpolation)
 10. [Performance Comparison with MAC Grid](#performance-comparison-with-mac-grid)
+11. [Literature](#literature)
 
 ---
 
@@ -1331,9 +1332,56 @@ This elegant structure enables efficient implementation while maintaining exact 
 
 ---
 
-## References
+## Literature
 
-- Harlow, F.H. & Welch, J.E. (1965). "Numerical Calculation of Time-Dependent Viscous Incompressible Flow". Physics of Fluids.
-- Stam, J. (1999). "Stable Fluids". SIGGRAPH 1999.
-- Bridson, R. (2015). "Fluid Simulation for Computer Graphics". CRC Press.
-- Rhie, C.M. & Chow, W.L. (1983). "Numerical Study of the Turbulent Flow Past an Airfoil with Trailing Edge Separation". AIAA Journal.
+### Historical Context
+
+The vertex grid arrangement (cell-centered velocity, nodal pressure) was introduced by Almgren, Bell, and collaborators in the 1990s as an "approximate projection" method. The key papers are:
+
+- **Almgren, A.S., Bell, J.B. & Szymczak, W.G. (1996).** "A numerical method for the incompressible Navier-Stokes equations based on an approximate projection." *SIAM J. Sci. Comput.* 17:358-369.
+  - Introduced the cell-centered velocity / nodal pressure arrangement
+  - Recognized that the composed Laplacian L = D·G produces a "compact stencil" with "local decoupling"
+  - Called it an "approximate projection" because the velocity is only approximately divergence-free
+
+- **Rider, W.J. (1998).** "Filtering non-solenoidal modes in numerical solutions of incompressible flows." *Int. J. Numer. Methods Fluids* 28:789-814.
+  - Analyzed the spurious non-solenoidal modes that arise from approximate projections
+  - Proposed filtering techniques to remove high-frequency decoupled modes
+  - Showed that without filtering, long-term integrations and density jumps cause problems
+
+- **Drikakis, D. & Rider, W. (2005).** *High-Resolution Methods for Incompressible and Low-Speed Flows.* Springer.
+  - Chapter 12 covers approximate projection methods in detail
+  - States that the corner/diagonal stencil is the consistent Laplacian for 2D
+  - **Note:** The book appears to extend this claim to 3D, stating that the corner stencil is also correct in 3D. This appears to be an error—the derivation in this document shows the consistent 3D Laplacian is actually a 27-point stencil with non-zero face and edge contributions.
+
+### The 3D Correction
+
+The assumption that corner-only works in 3D fails due to geometry:
+
+- **2D:** The diagonal neighbors of a square lattice form another square lattice (rotated 45°). Face neighbors cancel exactly in ∇·∇.
+- **3D:** The corner neighbors of a cubic lattice form a BCC lattice, which is geometrically distinct. Face and edge neighbors do **not** cancel.
+
+The full 27-point stencil derived in this document, with weights -24 (center), -4 (faces), +2 (edges), +3 (corners), appears to be a novel correction to the published literature. The decomposition into face:edge:corner with ratio -1:2:3, and the use of the corner stencil as a preconditioner rather than the exact operator, follow from this corrected derivation.
+
+### Related Approaches
+
+- **Rhie, C.M. & Chow, W.L. (1983).** "Numerical Study of the Turbulent Flow Past an Airfoil with Trailing Edge Separation." *AIAA Journal.*
+  - Introduced momentum-weighted interpolation for collocated grids
+  - Different approach: adds compact coupling to fix the wide stencil, rather than deriving the consistent operator
+
+### Foundational References
+
+- **Harlow, F.H. & Welch, J.E. (1965).** "Numerical Calculation of Time-Dependent Viscous Incompressible Flow." *Physics of Fluids.*
+  - Introduced the MAC (staggered) grid, which the vertex grid is dual to
+
+- **Stam, J. (1999).** "Stable Fluids." *SIGGRAPH 1999.*
+  - Popularized fluid simulation in graphics using unconditionally stable semi-Lagrangian advection
+
+- **Bridson, R. (2015).** *Fluid Simulation for Computer Graphics.* CRC Press.
+  - Standard reference for graphics-oriented fluid simulation
+
+### Modern Implementations
+
+- **AMReX-Hydro NodalProjector:** https://amrex-fluids.github.io/amrex-hydro/docs_html/Projections.html
+  - Modern implementation of nodal projection for cell-centered velocity
+  - Uses the approximate projection approach with cell-averaged pressure gradients
+  - Part of the AMReX adaptive mesh refinement framework
