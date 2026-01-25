@@ -11,6 +11,7 @@ This document derives the consistent discrete Laplacian for a "vertex grid" (als
 5. [Taylor Expansion Analysis](#taylor-expansion-analysis)
 6. [Operator Consistency vs Truncation Error](#operator-consistency-vs-truncation-error)
 7. [Iterative Solution Strategy](#iterative-solution-strategy)
+8. [Lattice Decoupling and Cache Optimization](#lattice-decoupling-and-cache-optimization)
 
 ---
 
@@ -312,6 +313,143 @@ The corner solve removes the bulk of the divergence (capturing the dominant BCC-
 2. **Good initial guess:** First corner solve gets most of the way there
 3. **Fast convergence:** With ω=4/3, few iterations needed for full consistency
 4. **Parallelization:** Corner stencil may have better parallelization properties
+
+---
+
+## Lattice Decoupling and Cache Optimization
+
+A key insight for efficient implementation is that both the 2D diagonal stencil and the 3D corner stencil exhibit **sublattice decoupling**, which can be exploited for better cache utilization and parallelization.
+
+### 2D Sublattice Structure
+
+The diagonal stencil only samples corners at (i±1, j±1). Consider the parity of vertices:
+
+- **Even vertices:** (i+j) mod 2 = 0
+- **Odd vertices:** (i+j) mod 2 = 1
+
+Diagonal neighbors of an even vertex (i,j):
+- (i+1, j+1): parity = i+j+2 = **even**
+- (i+1, j-1): parity = i+j = **even**
+- (i-1, j+1): parity = i+j = **even**
+- (i-1, j-1): parity = i+j-2 = **even**
+
+**The diagonal stencil only couples even-to-even and odd-to-odd.** The pressure grid splits into two independent sublattices!
+
+### Why 2D Projection Still Works
+
+Although the Laplacian decouples, the full projection pipeline couples the sublattices:
+
+```
+v* ──→ d_even ──→ p_even ──┐
+   │                       ├──→ ∇p ──→ v_new
+   └→ d_odd  ──→ p_odd  ──┘
+```
+
+1. **Divergence:** v* produces divergence on ALL vertices (both parities)
+2. **Laplacian solve:** Two independent Poisson problems with consistent RHS
+3. **Gradient:** ∇p at each velocity cell samples 4 vertices (2 even + 2 odd)
+4. **Projection:** Both pressure parities contribute to velocity correction
+
+The even/odd split is an internal detail of the pressure solve, invisible to the velocity field.
+
+### 2D Deinterlacing for Cache Efficiency
+
+The diagonal stencil on the full grid equals the **standard 5-point stencil on a rotated sublattice**.
+
+Using rotated coordinates (a,b) where a = (i+j)/2, b = (i-j)/2:
+- Original diagonal neighbors (i±1, j±1) become face neighbors (a±1, b) and (a, b±1)
+
+```
+Original grid (strided access):      Deinterlaced (contiguous):
+
+    X   o   X   o                         X   X   X
+    o   X   o   X          →              X   X   X
+    X   o   X   o                         X   X   X
+    o   X   o   X
+```
+
+**Benefits:**
+- Each sublattice is a contiguous ~(N/√2) × (N/√2) array
+- Standard 5-point stencil with unit stride
+- No skipping neighbors - perfect cache line utilization
+- Two smaller solves instead of one large strided solve
+
+### 3D Sublattice Structure
+
+The corner stencil samples 8 vertices at (i±1, j±1, k±1). Using 3-bit parity (i mod 2, j mod 2, k mod 2):
+
+Corner neighbors flip ALL three parities:
+- (0,0,0) ↔ (1,1,1)
+- (0,0,1) ↔ (1,1,0)
+- (0,1,0) ↔ (1,0,1)
+- (0,1,1) ↔ (1,0,0)
+
+**Four independent bipartite pairs!** Each pair forms a separate subproblem on 1/4 of the grid.
+
+### 3D Deinterlacing
+
+Similar to 2D, the corner stencil becomes a standard stencil on rotated sublattices:
+- Original corner neighbors (±1,±1,±1) become face neighbors in the rotated basis
+- The 9-point BCC stencil becomes a standard 7-point stencil on each sublattice
+
+```
+512³ grid → 4 independent ~(256)³ subproblems
+Each with standard 7-point stencil, contiguous memory access
+```
+
+### Recoupling Through Residual
+
+For the 3D iterative preconditioner, the sublattices decouple during the corner solve but recouple during residual computation:
+
+```
+1. Decouple: Corner solve (4 parallel sublattice solves)
+           ↓
+2. Recouple: 27-point residual (mixes all 8 colors)
+           ↓
+3. Iterate: Cross-sublattice information accumulates
+```
+
+The full 27-point stencil has face, edge, AND corner neighbors - it couples all 8 parity classes. This is analogous to how divergence/gradient couple the 2D sublattices.
+
+| Dimension | Decoupled Solve | Recoupling Mechanism |
+|-----------|-----------------|---------------------|
+| 2D | Diagonal (2 sublattices) | Divergence/Gradient operators |
+| 3D | Corner (4 sublattices) | 27-point residual |
+
+### Multigrid Integration
+
+The sublattice structure integrates naturally with Full Multigrid (FMG):
+
+```
+1. Initial corner solve (4 parallel sublattice solves)
+2. Compute full 27-point residual (recouples)
+3. FMG V-cycle on residual equation
+4. Apply correction with ω = 4/3
+5. Usually converged in 1-2 outer iterations
+```
+
+**Why this works well:**
+- Corner solve removes bulk of divergence (O(N) complexity)
+- Residual is smooth - exactly what multigrid handles efficiently
+- FMG achieves O(N) complexity for the correction
+- Sublattice structure can be maintained through coarse levels
+
+### Boundary Considerations
+
+The clean decoupling holds for **homogeneous domains**. Boundaries can recouple:
+
+**What breaks decoupling:**
+- Internal boundaries (obstacles) with modified stencils
+- Neumann BCs that reference across parities
+- Immersed boundary methods with interpolation
+- Irregular domain boundaries
+
+**Practical approach:**
+- Homogeneous interior: Full decoupling (fast, cache-friendly)
+- Boundary regions: Handle coupling as correction or fall back to coupled solve
+- Complex geometry: May lose clean separation entirely
+
+The optimization is most valuable for large homogeneous regions where the decoupled solve dominates the work.
 
 ---
 
