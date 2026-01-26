@@ -1484,7 +1484,7 @@ The clean decoupling assumes a **homogeneous domain**. Boundaries can recouple s
 - Simple rectangular domains
 
 **What breaks decoupling:**
-- **Internal obstacles:** Modified stencil at boundary cells may reference across sublattices
+- **Internal obstacles:** Modified stencil at boundary cells may reference across sublattices (see [Vertex_Grid_Collision.md](Vertex_Grid_Collision.md) for detailed treatment)
 - **Neumann boundaries:** Gradient condition involves neighbors of both parities
 - **Immersed boundaries:** Interpolation spreads across all nearby points
 - **Irregular domains:** Boundary doesn't respect sublattice structure
@@ -2013,6 +2013,9 @@ This filter construction follows Drikakis & Rider (2005), Chapter 12, which deri
 | **Deinterlaced stencil** | Standard 5-point | Standard 7-point |
 | **Optimal preconditioner ω** | N/A (exact) | 4/3 |
 | **Hourglass filter needed** | No | Yes (corners+faces) |
+| **Obstacle handling** | Modify diagonal stencil | Modify 27-point + breaks decoupling |
+
+For detailed treatment of solid obstacles and boundary conditions, see [Vertex_Grid_Collision.md](Vertex_Grid_Collision.md).
 
 ### The Big Picture
 
